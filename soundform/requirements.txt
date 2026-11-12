@@ -1,0 +1,12 @@
+# Soundform — Python 3.10+ (developed on 3.10; 3.11 and 3.12 are compatible)
+numpy>=1.24
+scipy>=1.11
+soundfile>=0.12
+matplotlib>=3.7
+PySide6>=6.5
+pyvista>=0.43
+pyvistaqt>=0.11
+trimesh>=4.0
+rtree>=1.2
+sounddevice>=0.4
+pytest>=7.4
