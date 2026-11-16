@@ -27,7 +27,7 @@ class ProposalPanel(QWidget):
         self.applied_threshold = None
         self.controls = []
         layout = QVBoxLayout(self)
-        layout.addWidget(self._label("OpenAI receives the brief, sketches, directional sound summary and a preview of the built proposal."))
+        layout.addWidget(self._label("Claude Opus receives the brief, sketches, directional sound summary and a preview of the built proposal."))
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText("Describe your design intent and requirements.")
         self.prompt.setMaximumHeight(105)

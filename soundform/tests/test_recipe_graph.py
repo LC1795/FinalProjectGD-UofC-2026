@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from soundform.geometry.proposal import build_proposal
+from soundform.geometry.recipe_graph import validate_graph
 from soundform.models.project import default_parameters
 
 
@@ -19,6 +20,21 @@ def _build(*nodes):
         ],
         "nodes": list(nodes),
     }, default_parameters())
+
+
+def test_angle_parameter_accepts_the_word_degrees_and_a_missing_label():
+    graph = validate_graph({
+        "recipe_version": 2,
+        "rationale": "Quiet boards turn away from the loud bearing.",
+        "parameters": [
+            {"name": "p_quiet_angle", "label": "  ", "unit": "degrees",
+             "min": 0, "max": 90, "step": 1, "value": 15},
+        ],
+        "nodes": [_node("cylinder", x=0, y=0, z=0, radius=1, height="p_quiet_angle")],
+    })
+
+    assert graph["parameters"][0]["label"] == "Quiet angle"
+    assert graph["parameters"][0]["unit"] == "°"
 
 
 def test_loft_caps_unequal_closed_profiles_without_degenerate_faces():

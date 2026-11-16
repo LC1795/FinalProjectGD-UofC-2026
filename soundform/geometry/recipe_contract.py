@@ -1,4 +1,4 @@
-"""Strict OpenAI response contract for Soundform's typed geometry graph."""
+"""JSON shape for Soundform's typed geometry graph."""
 
 from soundform.geometry.recipe_graph import NODES, PARAMETER_PATTERN
 

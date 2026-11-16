@@ -123,33 +123,47 @@ def sound_summary(field, maps, selected, params):
     }
 
 
-def _openai_error(exc: HTTPError, key: str) -> str:
+def _claude_error(exc: HTTPError, key: str) -> str:
     try:
         payload = json.loads(exc.read(16384))
     except (ValueError, OSError):
         payload = {}
     error = payload.get("error") if isinstance(payload, dict) else None
     error = error if isinstance(error, dict) else {}
-    code = error.get("code") or error.get("type")
+    code = error.get("type")
     code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else None
-    headline = f"OpenAI request failed (HTTP {exc.code}" + (f", {code})." if code else ").")
+    headline = f"Claude request failed (HTTP {exc.code}" + (f", {code})." if code else ").")
     if exc.code == 401:
-        return headline + " Check the API key and its project or organization."
-    if code in {"insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached"}:
-        return headline + " Check the credit balance and usage limits for the API organization that owns this key."
-    if exc.code == 429:
-        return headline + " Check the project's rate limits and wait briefly before retrying."
+        return headline + " Check ANTHROPIC_API_KEY and relaunch Soundform from that same window."
+    if exc.code == 429 or code == "rate_limit_error":
+        return headline + " Wait briefly, then try Generate proposal again."
+    if code in {"credit_balance_exhausted", "billing_error"} or exc.code == 402:
+        return headline + " Check the credit balance for this Claude API key."
     message = error.get("message")
     if isinstance(message, str):
-        message = re.sub(r"sk-[^\s\x27\x22,)]+", "[redacted]", message.replace(key, "[redacted]"))
+        message = re.sub(r"sk-ant-[^\s\x27\x22,)]+", "[redacted]", message.replace(key, "[redacted]"))
         return headline + " " + " ".join(message.split())[:350]
     return headline
 
 
+def _image_block(data_url: str) -> dict:
+    header, _, encoded = data_url.partition(",")
+    media = header.removeprefix("data:").split(";", 1)[0] or "image/png"
+    return {"type": "image", "source": {"type": "base64", "media_type": media, "data": encoded}}
+
+
+def _json_object(text: str):
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned)
+
+
 def request_proposal(prompt, sketches, summary, threshold, *, planning=False, plan=None, repair=None, review=None):
-    key = os.environ.get("OPENAI_API_KEY")
+    key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
-        raise ValueError("Set OPENAI_API_KEY in the environment and relaunch Soundform.")
+        raise ValueError("Set ANTHROPIC_API_KEY in the environment and relaunch Soundform.")
     catalog = {
         name: {"output": output, "inputs": inputs, "description": DESCRIPTIONS[name]}
         for name, (output, inputs) in NODES.items()
@@ -165,7 +179,8 @@ def request_proposal(prompt, sketches, summary, threshold, *, planning=False, pl
         "Connected inputs are zero-based indices of preceding nodes with the required output type. "
         "xyz_list and sections are inline XYZ coordinates. A number is a JSON number or the exact "
         "name of a declared p_ parameter. Formula strings are unsupported. Give editable controls "
-        "meaningful labels and ranges. Use degrees for angles and metres for lengths. "
+        "meaningful labels and ranges. The unit field must be exactly \"\", \"m\", \"°\", or \"%\". "
+        "Use \"°\" for angles and \"m\" for lengths. "
         "Local +Y is north and +X is east. Bearing 45 is northwest. The local origin is the listener "
         "at ground level. Keep complete components within the recipe_frame site bounds and maximum height. "
         "Include a terminal mesh node. Mesh nodes feeding another mesh node are intermediate geometry. "
@@ -177,7 +192,7 @@ def request_proposal(prompt, sketches, summary, threshold, *, planning=False, pl
     design_input = {
         "prompt": prompt, "threshold_db_relative_to_peak": threshold, "sound_context": summary,
     }
-    task = "Return the pavilion proposal as a JSON object."
+    task = "Return the pavilion proposal as one JSON object and no other text."
     response_format = recipe_response_format(review=review is not None)
     if planning and plan is None:
         instructions = (
@@ -188,7 +203,7 @@ def request_proposal(prompt, sketches, summary, threshold, *, planning=False, pl
             "where relevant. Call out tradeoffs with the site constraints. Keep it concise. "
             "This pass defines intent. Geometry operations will be selected in the next pass."
         )
-        task = "Return a short architectural concept as a JSON object."
+        task = "Return a short architectural concept as one JSON object and no other text."
         response_format = concept_response_format()
     elif planning:
         design_input["design_concept"] = plan
@@ -205,7 +220,7 @@ def request_proposal(prompt, sketches, summary, threshold, *, planning=False, pl
             "renaming a component to imply an unbuilt feature. "
             f"Operation catalog: {json.dumps(catalog)}"
         )
-        task = "Return a construction plan as a JSON object."
+        task = "Return a construction plan as one JSON object and no other text."
         response_format = plan_response_format()
     elif plan is not None:
         design_input["design_plan"] = plan
@@ -242,44 +257,54 @@ def request_proposal(prompt, sketches, summary, threshold, *, planning=False, pl
             "percentage is a line-of-sight estimate."
         )
         design_input["built_proposal"] = review[0]
+    keys = ", ".join(response_format["schema"]["properties"])
     content = [{
-        "type": "input_text",
-        "text": task + "\nDesign input:\n" + json.dumps(design_input),
+        "type": "text",
+        "text": task + f" Required keys: {keys}.\nDesign input:\n" + json.dumps(design_input),
     }]
-    content.extend({"type": "input_image", "image_url": image} for image in sketches)
+    content.extend(_image_block(image) for image in sketches)
     if review is not None:
-        content.append({"type": "input_text", "text": "Next image: orthographic views of the actual built proposal."})
-        content.append({"type": "input_image", "image_url": review[1]})
+        content.append({"type": "text", "text": "Next image: orthographic views of the actual built proposal."})
+        content.append(_image_block(review[1]))
+    if review is not None or not planning:
+        max_tokens = 32000
+    elif plan is not None:
+        max_tokens = 16000
+    else:
+        max_tokens = 8000
     payload = {
-        "model": os.environ.get("SOUNDFORM_OPENAI_MODEL", "gpt-4.1-mini"),
-        "instructions": instructions,
-        "input": [{"role": "user", "content": content}],
-        "text": {"format": response_format},
-        "max_output_tokens": 2000 if planning and plan is not None else (1000 if planning else 4500),
-        "store": False,
+        "model": os.environ.get("SOUNDFORM_CLAUDE_MODEL", "claude-opus-5-5"),
+        "max_tokens": max_tokens,
+        "output_config": {"effort": "low"},
+        "system": instructions,
+        "messages": [{"role": "user", "content": content}],
     }
-    request = Request("https://api.openai.com/v1/responses", data=json.dumps(payload).encode(),
-                      headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    request = Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(payload).encode(),
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2026-10-21",
+            "content-type": "application/json",
+        },
+    )
     try:
-        with urlopen(request, timeout=35) as reply:
+        with urlopen(request, timeout=180) as reply:
             data = json.load(reply)
     except HTTPError as exc:
-        raise ValueError(_openai_error(exc, key)) from exc
+        raise ValueError(_claude_error(exc, key)) from exc
     except (URLError, TimeoutError) as exc:
-        raise ValueError(f"Could not reach OpenAI: {exc}") from exc
-    content = [part for item in data.get("output", []) for part in item.get("content", [])]
-    if any(part.get("type") == "refusal" for part in content):
-        raise ValueError("OpenAI declined to generate a recipe for this request.")
-    if data.get("status") == "incomplete":
-        details = data.get("incomplete_details") or {}
-        if details.get("reason") == "max_output_tokens":
-            raise ValueError("OpenAI's recipe hit the output length limit. Try asking for fewer groups or profile points.")
-        raise ValueError("OpenAI did not finish the recipe.")
-    parts = [part["text"] for part in content if part.get("type") == "output_text"]
+        raise ValueError(f"Could not reach Claude: {exc}") from exc
+    blocks = data.get("content") or []
+    if data.get("stop_reason") == "refusal":
+        raise ValueError("Claude declined to generate a recipe for this request.")
+    if data.get("stop_reason") == "max_tokens":
+        raise ValueError("Claude's reply was cut off before the recipe finished. Try a shorter brief, then generate again.")
+    parts = [block.get("text", "") for block in blocks if block.get("type") == "text"]
     try:
-        return json.loads("".join(parts))
+        return _json_object("".join(parts))
     except json.JSONDecodeError as exc:
-        raise ValueError("The model did not return a complete pavilion definition.") from exc
+        raise ValueError("Claude did not return a complete pavilion definition.") from exc
 
 
 def validate_proposal(proposal):
@@ -580,7 +605,7 @@ def _build_online(prompt, sketches, summary, threshold, params, directional_ener
             errors.append(str(exc))
             _record_recipe_failure(draft, errors[-1], params, directional_energy)
             repair = (errors[-1], draft, errors[:-1])
-    raise ValueError(f"OpenAI's recipe could not be built after three attempts. {errors[-1]}")
+    raise ValueError(f"Claude's recipe could not be built after three attempts. {errors[-1]}")
 
 
 def evaluate_proposal(field, params, threshold, proposal=None, prompt="", sketches=(), online=False):
@@ -598,7 +623,7 @@ def evaluate_proposal(field, params, threshold, proposal=None, prompt="", sketch
         proposal = validate_proposal(proposal)
     else:
         if proposal is None:
-            raise ValueError("Enter a design brief or attach a sketch and generate with OpenAI.")
+            raise ValueError("Enter a design brief or attach a sketch and generate with Claude.")
         proposal = validate_proposal(proposal)
         mesh = build_proposal(proposal, used, directional_energy)
     response = compute_response(field, {"broadband": 1.0}, smoothing=0)
