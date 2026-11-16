@@ -1,7 +1,7 @@
 """Heuristic before/after exposure.
 
 For each spherical cell, a ray travels from outside the site toward the
-listening point at 1.5 m. If the mesh blocks that ray more than 0.35 m before
+listening point at adult ear height. If the mesh blocks that ray more than 0.35 m before
 the listener, and the hit is above the ground, the cell counts as covered.
 
 Exposure after is incoming relative energy times (1 − coverage). That is an

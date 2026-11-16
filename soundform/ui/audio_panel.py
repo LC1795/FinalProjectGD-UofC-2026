@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -65,8 +67,8 @@ class AudioPanel(QWidget):
         self.import_button = QPushButton("Import WAV")
         self.import_button.setObjectName("primary")
         self.import_button.clicked.connect(lambda *_args: self._import())
-        self.example_button = QPushButton("Example")
-        self.example_button.setToolTip("Write a synthetic first-order Ambisonic WAV with a known direction change.")
+        self.example_button = QPushButton("Site soundscape")
+        self.example_button.setToolTip("Generate a 32-second third-order scene with two-way traffic, a train, and a pond.")
         self.example_button.clicked.connect(lambda *_args: self._example())
         buttons.addWidget(self.import_button)
         buttons.addWidget(self.example_button)
@@ -267,7 +269,10 @@ class AudioPanel(QWidget):
         self._redraw_waveform()
 
     def current_convention(self) -> str | None:
-        return self.convention.currentData()
+        chosen = self.convention.currentData()
+        if self.audio is not None and self.audio.channels == 16 and chosen == "fuma":
+            return None
+        return chosen
 
     def settings(self) -> AnalysisSettings:
         return AnalysisSettings(
@@ -314,7 +319,9 @@ class AudioPanel(QWidget):
             self.open_requested.emit(path)
 
     def _example(self) -> None:
-        path, _filter = QFileDialog.getSaveFileName(self, "Save synthetic FOA example", "soundform-example.wav", "WAV audio (*.wav)")
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save synthetic site soundscape", str(Path.cwd() / "soundform-north-site-order-3.wav"), "WAV audio (*.wav)"
+        )
         if path:
             self.example_requested.emit(path)
 

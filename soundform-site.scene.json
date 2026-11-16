@@ -1,0 +1,52 @@
+{
+  "duration_seconds": 45,
+  "format": "First-order ACN/SN3D (AmbiX)",
+  "bearing_reference": "0 degrees forward, positive toward microphone left",
+  "level_reference": "Relative digital levels",
+  "traffic": {
+    "azimuth_deg": 0,
+    "elevation_deg": 0,
+    "active_seconds": [
+      0,
+      45
+    ]
+  },
+  "train": {
+    "forward_m": 14,
+    "left_m": "5.5 * (24 - time_s)",
+    "peak_pass_seconds": 24,
+    "elevation_deg": 0,
+    "checkpoints": [
+      {
+        "time_s": 18,
+        "azimuth_deg": 67.0
+      },
+      {
+        "time_s": 24,
+        "azimuth_deg": 0.0
+      },
+      {
+        "time_s": 30,
+        "azimuth_deg": -67.0
+      }
+    ]
+  },
+  "wind": {
+    "azimuth_deg": 165,
+    "elevation_deg": 5
+  },
+  "birds": {
+    "azimuth_deg": 185,
+    "elevation_deg": 18,
+    "onsets_seconds": [
+      3,
+      7,
+      12,
+      16,
+      31,
+      36,
+      40,
+      43
+    ]
+  }
+}

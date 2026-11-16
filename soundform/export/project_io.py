@@ -17,6 +17,8 @@ import trimesh
 from soundform.acoustics.sound_field import SoundField
 from soundform.errors import ExportError
 from soundform.export.mesh_export import export_mesh
+from soundform.geometry.pavilion_edit import PART_ATTRIBUTE
+from soundform.geometry.proposal import validate_proposal
 from soundform.models.project import AnalysisSettings, DesignParameters
 
 
@@ -24,6 +26,9 @@ from soundform.models.project import AnalysisSettings, DesignParameters
 class ProjectRecord:
     audio_path: str | None = None
     audio_found: bool = False
+    site_path: str | None = None
+    recipe: dict | None = None
+    recipe_threshold: float | None = None
     convention: str | None = None
     analysis_settings: AnalysisSettings = field(default_factory=AnalysisSettings)
     design: DesignParameters = field(default_factory=DesignParameters)
@@ -52,6 +57,10 @@ def save_project(
     design: DesignParameters,
     sound_field: SoundField | None = None,
     mesh: trimesh.Trimesh | None = None,
+    *,
+    site_path: str | None = None,
+    recipe: dict | None = None,
+    recipe_threshold: float | None = None,
 ) -> None:
     destination = Path(path)
     if destination.suffix.lower() != ".json":
@@ -71,11 +80,16 @@ def save_project(
         "format": "soundform-project",
         "version": 1,
         "audio_path": audio_path,
+        "site_path": site_path,
+        "recipe": recipe,
+        "recipe_threshold": recipe_threshold,
         "convention": convention,
         "analysis_settings": analysis_settings.to_dict(),
         "design": design.to_dict(),
         "analysis_cache": analysis_name,
         "mesh_cache": mesh_name,
+        "mesh_parts": (mesh.face_attributes[PART_ATTRIBUTE].tolist()
+                       if mesh is not None and PART_ATTRIBUTE in mesh.face_attributes else None),
         "notes": [
             "Audio samples are not embedded. audio_path is a reference only.",
             "Levels in the analysis cache are relative, not dB SPL.",
@@ -101,6 +115,8 @@ def load_project(path: str) -> ProjectRecord:
         design=DesignParameters.from_dict(payload.get("design") or {}),
     )
     resolved, found = _resolve_audio(payload.get("audio_path"), source)
+    site_path, _ = _resolve_audio(payload.get("site_path"), source)
+    record.site_path = site_path
     record.audio_path = resolved
     record.audio_found = found
     if payload.get("audio_path") and not found:
@@ -126,11 +142,24 @@ def load_project(path: str) -> ProjectRecord:
                 loaded = trimesh.load(mesh_path, force="mesh", process=False)
                 if len(loaded.faces) == 0:
                     raise ExportError("The saved mesh is empty.")
+                parts = payload.get("mesh_parts")
+                if isinstance(parts, list) and len(parts) == len(loaded.faces) and all(isinstance(p, str) for p in parts):
+                    loaded.face_attributes[PART_ATTRIBUTE] = np.asarray(parts)
                 record.mesh = loaded
             except Exception as exc:
                 record.warnings.append(f"Saved geometry could not be read ({exc}).")
         else:
             record.warnings.append("The saved mesh file is missing.")
+    recipe, threshold = payload.get("recipe"), payload.get("recipe_threshold")
+    if recipe is not None and record.mesh is not None:
+        try:
+            if (not isinstance(recipe, dict) or recipe.get("recipe_version") not in (1, 2)
+                    or type(threshold) not in (int, float) or not -80 <= threshold <= 0):
+                raise ValueError("Unsupported recipe version or invalid sound threshold.")
+            record.recipe = validate_proposal(recipe)
+            record.recipe_threshold = threshold
+        except ValueError as exc:
+            record.warnings.append(f"Saved design recipe could not be restored ({exc}).")
     return record
 
 

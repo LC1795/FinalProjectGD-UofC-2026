@@ -8,10 +8,11 @@ import trimesh
 from soundform.errors import ExportError, GeometryError
 
 
-def as_mesh(vertices: np.ndarray, faces: np.ndarray) -> trimesh.Trimesh:
+def as_mesh(vertices: np.ndarray, faces: np.ndarray, *, face_attributes=None) -> trimesh.Trimesh:
     if len(vertices) < 3 or len(faces) < 1:
         raise GeometryError("The generator produced an empty mesh. Adjust the site or the response.")
-    mesh = trimesh.Trimesh(vertices=np.asarray(vertices, dtype=np.float64), faces=np.asarray(faces, dtype=np.int64), process=False)
+    mesh = trimesh.Trimesh(vertices=np.asarray(vertices, dtype=np.float64), faces=np.asarray(faces, dtype=np.int64),
+                          face_attributes=face_attributes, process=False)
     mesh.update_faces(mesh.nondegenerate_faces())
     mesh.remove_unreferenced_vertices()
     if mesh.faces.size == 0 or mesh.vertices.size == 0:

@@ -19,6 +19,7 @@ from soundform.acoustics.directional_energy import (
 from soundform.acoustics.time_frequency import choose_stft_params, stft_wxyz, welch_relative_db
 from soundform.audio.loader import amplitude_dbfs
 from soundform.errors import AnalysisError
+from soundform.acoustics.higher_order import beam_power_maps
 
 LEVEL_NOTE = (
     "Levels are relative to digital full scale (dBFS) or are normalized energy "
@@ -229,7 +230,10 @@ def analyze_file(
     band_limits: dict[str, tuple[float, float]],
 ) -> SoundField:
     """Decode `samples` with `convention` and estimate a time-varying sound field."""
-    decoded = decode_foa(samples, convention)
+    third_order = samples.ndim == 2 and samples.shape[1] == 16
+    if third_order and convention not in ("acn_sn3d", "acn_n3d"):
+        raise AnalysisError("Third-order recordings require ACN/SN3D or ACN/N3D.")
+    decoded = samples if third_order else decode_foa(samples, convention)
     if end_s <= start_s:
         raise AnalysisError("The analysis interval end must be later than the start.")
     if start_s < -1e-6 or end_s > file_duration + 0.05:
@@ -243,6 +247,10 @@ def analyze_file(
 
     warnings = [
         LEVEL_NOTE,
+        "Third-order spherical beamforming shows directional band power. Broad peaks and "
+        "sidelobes can remain, especially with closely spaced or correlated arrivals. "
+        "The timeline direction and confidence still describe the first-order net arrival."
+        if third_order else
         "Each time-frequency tile contributes one arrival direction. Sources that overlap "
         "in the same tile are not separated. The map is a first-order estimate, not a "
         "high-resolution image of the sound field.",
@@ -300,9 +308,13 @@ def analyze_file(
             stft_nperseg=nperseg,
         )
 
-    frequencies, times, spectra = stft_wxyz(segment, sample_rate, nperseg, hop)
+    frequencies, times, spectra = stft_wxyz(segment.astype(np.float32, copy=False) if third_order else segment, sample_rate, nperseg, hop)
     times = times + (start_index / sample_rate)
-    intensity = active_intensity(spectra[0], spectra[1], spectra[2], spectra[3])
+    if third_order:
+        scale = np.float32(np.sqrt(3)) if convention == "acn_n3d" else np.float32(1)
+        intensity = active_intensity(spectra[0], spectra[3] / scale, spectra[1] / scale, spectra[2] / scale)
+    else:
+        intensity = active_intensity(spectra[0], spectra[1], spectra[2], spectra[3])
     intensity_x, intensity_y, intensity_z, energy, confidence = intensity
     # Sub-bass bins are poorly localised by a short Fourier window and are
     # excluded from the directional estimate. They still contribute to RMS.
@@ -322,30 +334,37 @@ def analyze_file(
         "mid": _frequency_mask(frequencies, used_limits["mid"]),
         "high": _frequency_mask(frequencies, used_limits["high"]),
     }
-    maps: dict[str, np.ndarray] = {}
-    cell_confidence = None
-    for name, mask in masks.items():
-        histogram, confidence_acc = accumulate_direction_histogram(
-            intensity_x,
-            intensity_y,
-            intensity_z,
-            energy,
-            confidence,
-            mask,
-            len(azimuth),
-            len(elevation),
-            edges,
-        )
-        maps[name] = histogram.astype(np.float32)
-        if name == "broadband":
-            cell_confidence = np.divide(
-                confidence_acc,
-                histogram,
-                out=np.zeros_like(histogram),
-                where=histogram > 1e-20,
-            ).astype(np.float32)
-    if cell_confidence is None:
+    if third_order:
+        if convention == "acn_sn3d":
+            scale = np.sqrt(2 * np.repeat(np.arange(4), [1, 3, 5, 7]) + 1).astype(np.float32)
+            spectra *= scale[:, None, None]
+        maps = beam_power_maps(spectra, masks, azimuth, elevation)
         cell_confidence = np.zeros_like(maps["broadband"])
+    else:
+        maps: dict[str, np.ndarray] = {}
+        cell_confidence = None
+        for name, mask in masks.items():
+            histogram, confidence_acc = accumulate_direction_histogram(
+                intensity_x,
+                intensity_y,
+                intensity_z,
+                energy,
+                confidence,
+                mask,
+                len(azimuth),
+                len(elevation),
+                edges,
+            )
+            maps[name] = histogram.astype(np.float32)
+            if name == "broadband":
+                cell_confidence = np.divide(
+                    confidence_acc,
+                    histogram,
+                    out=np.zeros_like(histogram),
+                    where=histogram > 1e-20,
+                ).astype(np.float32)
+        if cell_confidence is None:
+            cell_confidence = np.zeros_like(maps["broadband"])
 
     band_confidence = (confidence * energy).sum(axis=0) / (energy.sum(axis=0) + 1e-20)
     dominant_az, dominant_el, agreement = dominant_direction(intensity_x, intensity_y, intensity_z)
@@ -358,12 +377,12 @@ def analyze_file(
 
     mean_confidence = float(np.average(band_confidence, weights=np.maximum(frame_power, 1e-20)))
     mean_agreement = float(np.average(agreement, weights=np.maximum(frame_power, 1e-20)))
-    if mean_confidence < 0.35:
+    if not third_order and mean_confidence < 0.35:
         warnings.append(
             "Directional confidence is low. Energy is spread over the sphere because the "
             "field is diffuse, quiet, or out of phase, rather than pinned to one arrival."
         )
-    if mean_agreement < 0.35 and mean_confidence >= 0.35:
+    if not third_order and mean_agreement < 0.35 and mean_confidence >= 0.35:
         warnings.append(
             "Several directions are active together. A single dominant angle would fall "
             "between them, so the timeline withholds that angle where the bins disagree. "

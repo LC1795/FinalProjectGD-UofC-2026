@@ -87,6 +87,7 @@ def build_pavilion(response: ResponseField, params: DesignParameters, warnings: 
     for index in range(samples):
         faces.append((floor_center, floor_ring + index, floor_ring + (index + 1) % samples))
 
+    floor_end = len(faces)
     inner_bottom = add_ring(inner, np.zeros(samples))
     outer_bottom = add_ring(outer, np.zeros(samples))
     inner_top = add_ring(inner, roof_edge)
@@ -108,6 +109,7 @@ def build_pavilion(response: ResponseField, params: DesignParameters, warnings: 
         faces.append((inner_bottom + index, inner_bottom + nxt, outer_bottom + nxt))
         faces.append((inner_bottom + index, outer_bottom + nxt, outer_bottom + index))
 
+    wall_end = len(faces)
     # Roof: hold the crown flat over the protected zone, then descend to the wall.
     clear_s = float(np.clip(params.protected_radius / inner, 0.05, 0.85))
     rings = 7
@@ -143,7 +145,9 @@ def build_pavilion(response: ResponseField, params: DesignParameters, warnings: 
         faces.append((outer_roof + index, outer_roof + nxt, inner_top + nxt))
         faces.append((outer_roof + index, inner_top + nxt, inner_top + index))
 
-    mesh = as_mesh(np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int64))
+    parts = np.repeat(["Floor", "Walls", "Roof"], [floor_end, wall_end - floor_end, len(faces) - wall_end])
+    mesh = as_mesh(np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int64),
+                   face_attributes={"pavilion_part": parts})
     mesh.merge_vertices()
     mesh.update_faces(mesh.nondegenerate_faces())
     mesh.remove_unreferenced_vertices()

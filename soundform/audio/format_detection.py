@@ -38,7 +38,9 @@ CONVENTION_LABELS = {
     "acn_n3d": "ACN / N3D — channels W, Y, Z, X, first order × √3",
 }
 
-CONVENTION_HELP = """First-order Ambisonics stores a sound field in four channels. Those channels are not loudspeaker feeds.
+CONVENTION_HELP = """First-order Ambisonics uses four channels. Third order uses sixteen channels.
+Soundform analyzes third-order WAV files in ACN/SN3D or ACN/N3D and plays a stereo monitor mix
+from their first four channels. The Ambisonic channels are not loudspeaker feeds.
 
 ACN / SN3D (AmbiX) is the usual modern interchange format. The channel order is W, Y, Z, X. W is the omnidirectional pressure component. X, Y and Z are figure-of-eight components along the microphone's forward, left and up axes. For a unit-amplitude plane wave, W = 1 and X, Y, Z are the direction cosines.
 
@@ -224,15 +226,15 @@ def detect_spatial_format(path: str | Path, channels: int) -> FormatDetection:
                 "this tool needs, and it is not treated as Ambisonics."
             ],
         )
-    if channels != 4:
+    if channels not in (4, 16):
         return FormatDetection(
             spatial_status="unsupported",
             suggested_convention=None,
             severity="error",
             messages=[
                 f"This file has {channels} channels. Soundform decodes first-order "
-                "Ambisonics, which is four channels. Higher-order Ambisonics and "
-                "surround layouts are not trimmed or mixed down into a substitute "
+                "and third-order Ambisonics (four or sixteen channels). Other layouts "
+                "are not trimmed or mixed down into a substitute "
                 "first-order signal."
             ],
         )
@@ -254,6 +256,8 @@ def detect_spatial_format(path: str | Path, channels: int) -> FormatDetection:
 
     suggestion, conflict = _suggest_convention(text)
     messages: list[str] = []
+    if channels == 16 and suggestion == "fuma":
+        suggestion, conflict = None, "Third-order analysis requires an ACN channel order."
     if conflict:
         messages.append(conflict + " Choose the convention you know is correct.")
         suggestion = None
@@ -265,7 +269,7 @@ def detect_spatial_format(path: str | Path, channels: int) -> FormatDetection:
         )
     if suggestion is not None:
         messages.append(
-            f"File metadata indicates {CONVENTION_LABELS[suggestion]}. "
+            f"File metadata indicates {suggestion.replace('_', '/').upper()}. "
             "Confirm this before analysis. A wrong choice mirrors or swaps directions. "
             "Metadata does not record which way the microphone faced in the world; "
             "azimuth 0° stays the microphone's forward axis."
@@ -279,6 +283,13 @@ def detect_spatial_format(path: str | Path, channels: int) -> FormatDetection:
             speaker_mask=mask,
         )
 
+    if channels == 16:
+        messages.append("Sixteen channels were found. Confirm that this is third-order Ambisonics, "
+                        "then select ACN/SN3D or ACN/N3D.")
+        return FormatDetection(
+            spatial_status="needs_convention", suggested_convention=None, severity="warning",
+            messages=messages, evidence=evidence, speaker_mask=mask,
+        )
     messages.append(
         "Four channels were found, but the convention is not identified. A four-channel "
         "WAV is not assumed to be Ambisonics: it may be ordinary quad audio, which has "

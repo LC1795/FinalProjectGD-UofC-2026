@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QSplitter,
+    QTabWidget,
 )
 
 from soundform.acoustics.ambisonic_decoder import decode_foa
@@ -17,7 +18,7 @@ from soundform.acoustics.protection_estimator import estimate_protection
 from soundform.acoustics.sound_field import analyze_file
 from soundform.audio.loader import load_audio
 from soundform.audio.playback import MonitorPlayer, average_channel_downmix, stereo_monitor_downmix
-from soundform.audio.synthetic import write_synthetic_example
+from soundform.audio.site_soundscape import write_site_soundscape
 from soundform.errors import AudioLoadError, ExportError, SoundformError
 from soundform.export.mesh_export import export_mesh
 from soundform.export.project_io import (
@@ -28,11 +29,16 @@ from soundform.export.project_io import (
     save_project,
 )
 from soundform.geometry.generate import generate_architecture
+from soundform.geometry.pavilion_edit import edit_mesh, selected_mesh
+from soundform.geometry.site_model import load_site
+from soundform.geometry.proposal import evaluate_proposal, screening_percent
 from soundform.models.project import AnalysisSettings, default_parameters
 from soundform.ui.analysis_panel import AnalysisPanel
 from soundform.ui.audio_panel import AudioPanel
 from soundform.ui.geometry_controls import GeometryPanel
 from soundform.ui.viewport import Viewport
+from soundform.ui.pavilion_editor import PavilionEditor
+from soundform.ui.proposal_panel import ProposalPanel
 
 
 class _Worker(QThread):
@@ -56,6 +62,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Soundform")
         self.resize(1440, 900)
         self.audio = None
+        self.site_model = None
         self.field = None
         self.mesh = None
         self.report = None
@@ -70,6 +77,14 @@ class MainWindow(QMainWindow):
         self.audio_panel = AudioPanel()
         self.viewport = Viewport()
         self.geometry_panel = GeometryPanel()
+        self.pavilion_editor = PavilionEditor()
+        self.pavilion_editor.show_mesh(None)
+        self._mesh_undo = []
+        self.proposal_panel = ProposalPanel()
+        self._proposal_timer = QTimer(self)
+        self._proposal_timer.setSingleShot(True)
+        self._proposal_timer.setInterval(280)
+        self._proposal_timer.timeout.connect(self._edit_proposal)
         self.analysis_panel = AnalysisPanel()
 
         left = QScrollArea()
@@ -84,7 +99,16 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(center)
-        splitter.addWidget(self.geometry_panel)
+        proposal_scroll = QScrollArea()
+        proposal_scroll.setWidgetResizable(True)
+        proposal_scroll.setWidget(self.proposal_panel)
+        design_tabs = QTabWidget()
+        design_tabs.addTab(self.geometry_panel, "Manual")
+        design_tabs.addTab(proposal_scroll, "AI pavilion")
+        self._edit_tab = design_tabs.addTab(self.pavilion_editor, "Edit pavilion")
+        self._design_tabs = design_tabs
+        design_tabs.currentChanged.connect(self._highlight_pavilion)
+        splitter.addWidget(design_tabs)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([400, 700, 340])
         self.geometry_panel.setMinimumWidth(300)
@@ -115,10 +139,19 @@ class MainWindow(QMainWindow):
         self.audio_panel.display_changed.connect(self._refresh_views)
         self.audio_panel.analysis_inputs_changed.connect(self._mark_analysis_stale)
         self.geometry_panel.generate_requested.connect(self._generate)
+        self.pavilion_editor.selection_changed.connect(self._highlight_pavilion)
+        self.pavilion_editor.apply_requested.connect(self._edit_pavilion)
+        self.pavilion_editor.delete_requested.connect(lambda: self._edit_pavilion(delete=True))
+        self.pavilion_editor.undo_requested.connect(self._undo_pavilion)
         self.geometry_panel.guides_changed.connect(self._refresh_guides)
+        self.proposal_panel.generate_requested.connect(self._generate_proposal)
+        self.proposal_panel.dimensions_changed.connect(lambda: self._proposal_timer.start())
 
     def _menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
+        self._import_site_action = file_menu.addAction("Import Rhino site…", self._import_site)
+        self._clear_site_action = file_menu.addAction("Remove Rhino site", self._clear_site)
+        self._clear_site_action.setEnabled(False)
         file_menu.addAction("Import WAV…", self.audio_panel.import_button.click)
         file_menu.addAction("Create synthetic example…", self.audio_panel.example_button.click)
         file_menu.addSeparator()
@@ -137,6 +170,20 @@ class MainWindow(QMainWindow):
             view_menu.addAction(label, lambda checked=False, view=name: self.viewport.set_view(view))
         view_menu.addAction("Reset view", self.viewport.reset_view)
 
+    def _import_site(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import Rhino site", "", "Rhino model (*.3dm)")
+        if path:
+            self._start("site", lambda: load_site(path))
+
+    def _set_site(self, model) -> None:
+        self.site_model = model
+        self.viewport.set_site_model(model)
+        self._clear_site_action.setEnabled(model is not None)
+
+    def _clear_site(self) -> None:
+        self._set_site(None)
+        self.statusBar().showMessage("Rhino site removed.")
+
     def _open_audio(self, path: str) -> None:
         try:
             audio = load_audio(path)
@@ -151,7 +198,7 @@ class MainWindow(QMainWindow):
         self.player.stop()
         self.audio_panel.show_audio(audio)
         self._load_monitor()
-        self.viewport.set_mesh(None)
+        self._show_editable_mesh(None)
         self.analysis_panel.clear()
         self.analysis_panel.show_messages(audio.detection.messages)
         self._refresh_guides()
@@ -159,7 +206,7 @@ class MainWindow(QMainWindow):
 
     def _write_example(self, path: str) -> None:
         try:
-            info = write_synthetic_example(path)
+            info = write_site_soundscape(path)
         except Exception as exc:
             QMessageBox.warning(self, "Could not write the example", str(exc))
             return
@@ -172,8 +219,8 @@ class MainWindow(QMainWindow):
             return
         convention = self.audio_panel.current_convention()
         try:
-            if convention and self.audio.channels == 4:
-                stereo = stereo_monitor_downmix(decode_foa(self.audio.samples, convention))
+            if convention and self.audio.channels in (4, 16):
+                stereo = stereo_monitor_downmix(decode_foa(self.audio.samples[:, :4], convention))
                 note = "Stereo monitor of the decoded Ambisonic bed. This is not binaural and it is not the analysis."
             else:
                 stereo = average_channel_downmix(self.audio.samples)
@@ -191,6 +238,9 @@ class MainWindow(QMainWindow):
                 self.player.pause()
             else:
                 self.player.play()
+                if self.player.playing and self.field is not None:
+                    self.audio_panel.time_mode.setCurrentIndex(self.audio_panel.time_mode.findData("frame"))
+                    self._refresh_views()
         except Exception as exc:
             QMessageBox.warning(self, "Playback", str(exc))
         self.audio_panel.set_playing(self.player.playing)
@@ -265,6 +315,100 @@ class MainWindow(QMainWindow):
 
         self._start("generate", job)
 
+    def _generate_proposal(self) -> None:
+        self._start_proposal()
+
+    def _edit_proposal(self) -> None:
+        if self.proposal_panel.proposal is not None:
+            self._start_proposal(self.proposal_panel.edited_proposal())
+
+    def _start_proposal(self, definition=None) -> None:
+        if self.field is None or self._signature != self._signature_for(
+            self.audio_panel.current_convention(), self.audio_panel.settings()
+        ):
+            QMessageBox.information(self, "Analyze first", "Analyze the current recording before designing a pavilion.")
+            return
+        self._proposal_timer.stop()
+        panel = self.proposal_panel
+        editing = definition is not None
+        params = self.geometry_panel.parameters()
+        field = self.field
+        threshold = panel.applied_threshold if editing else panel.threshold.value()
+        prompt = panel.prompt.toPlainText().strip()
+        sketches = panel.sketch_images()
+        if not editing and not (prompt or sketches):
+            QMessageBox.information(self, "Add design input", "Enter a design prompt or attach a concept sketch.")
+            return
+
+        def job():
+            result = evaluate_proposal(field, params, threshold, definition, prompt, sketches, online=True)
+            return result, threshold, editing
+
+        self._start("proposal", job)
+
+    def _show_proposal(self, result) -> None:
+        (definition, mesh, report, baseline, warnings), threshold, editing = result
+        panel = self.proposal_panel
+        if editing:
+            panel.proposal = definition
+        else:
+            panel.show_proposal(definition)
+        panel.applied_threshold = threshold
+        self.mesh, self.report = mesh, report
+        self._show_editable_mesh(mesh)
+        screened = screening_percent(report)
+
+        def formatted(value):
+            return f"{value:.1f}%" if value is not None else "unavailable"
+
+        panel.result.setText(
+            f"Above-threshold energy screened ({threshold:g} dB relative to peak)\n"
+            f"Proposal {formatted(screened)} · Standard pavilion {formatted(baseline)}"
+        )
+        self.analysis_panel.show_report(report, self.field)
+        self.analysis_panel.show_messages([*self.field.warnings, *warnings, *report.warnings])
+        self.statusBar().showMessage("Pavilion preview updated. Screening is a line-of-sight estimate.")
+
+    def _show_editable_mesh(self, mesh, *, new=True) -> None:
+        if new:
+            self._mesh_undo.clear()
+        self.viewport.set_mesh(mesh)
+        self.pavilion_editor.show_mesh(mesh, bool(self._mesh_undo))
+        self._highlight_pavilion()
+
+    def _highlight_pavilion(self) -> None:
+        selection = None
+        if self._design_tabs.currentIndex() == self._edit_tab:
+            selection = selected_mesh(self.mesh, self.pavilion_editor.selection.currentData())
+        self.viewport.set_pavilion_selection(selection)
+
+    def _edit_pavilion(self, *, delete=False) -> None:
+        if self.mesh is None:
+            return
+        panel = self.pavilion_editor
+        offset = tuple(widget.value() for widget in panel.offset)
+        rotation, scale = panel.rotation.value(), panel.scale.value()
+        if not delete and offset == (0, 0, 0) and rotation == 0 and scale == 1:
+            return
+        part = panel.selection.currentData()
+        self._mesh_undo.append(self.mesh)
+        self._mesh_undo = self._mesh_undo[-10:]
+        self.mesh = edit_mesh(self.mesh, part, delete=delete, offset=offset, rotation=rotation, scale=scale)
+        self._pavilion_changed()
+
+    def _undo_pavilion(self) -> None:
+        if self._mesh_undo:
+            self.mesh = self._mesh_undo.pop()
+            self._pavilion_changed()
+
+    def _pavilion_changed(self) -> None:
+        self._proposal_timer.stop()
+        self.proposal_panel.show_proposal(None)
+        self.report = None
+        self._show_editable_mesh(self.mesh, new=False)
+        self.analysis_panel.show_report(None, self.field)
+        self.statusBar().showMessage("Pavilion edited. The previous screening estimate was cleared.")
+
     def _start(self, kind: str, fn) -> None:
         if self._worker is not None and self._worker.isRunning():
             self.statusBar().showMessage("Wait for the current task to finish.")
@@ -276,19 +420,46 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
         self.audio_panel.set_busy(True)
         self.geometry_panel.set_busy(True)
-        self.statusBar().showMessage("Analyzing the sound field…" if kind == "analyze" else "Generating architecture…")
+        self.proposal_panel.setEnabled(False)
+        self.pavilion_editor.setEnabled(False)
+        self._import_site_action.setEnabled(False)
+        self._clear_site_action.setEnabled(False)
+        messages = {"analyze": "Analyzing the sound field.", "site": "Importing the Rhino site."}
+        self.statusBar().showMessage(messages.get(kind, "Generating architecture."))
         self._worker.start()
 
     def _job_ok(self, result) -> None:
         self._end_busy()
         if self._closing:
             return
+        if self._job == "site":
+            self._set_site(result)
+            params = self.geometry_panel.parameters()
+            params.protected_center_x = params.protected_center_y = 0.0
+            self.geometry_panel.set_parameters(params)
+            self.mesh = self.report = None
+            self.proposal_panel.show_proposal(None)
+            self._show_editable_mesh(None)
+            self._refresh_guides()
+            if self.field is not None:
+                self._refresh_views()
+                self.analysis_panel.show_report(None, self.field)
+            self.viewport.set_view("perspective")
+            self.viewport.plotter.reset_camera()
+            self.statusBar().showMessage(f"Imported {result.path.name}.")
+            if result.warnings:
+                QMessageBox.information(self, "Rhino site import", "\n".join(result.warnings))
+            return
+        if self._job == "proposal":
+            self._show_proposal(result)
+            return
         if self._job == "analyze":
+            self.proposal_panel.show_proposal(None)
             self.field = result
             self._signature = self._pending_signature
             self.mesh = None
             self.report = None
-            self.viewport.set_mesh(None)
+            self._show_editable_mesh(None)
             self._shown_frame = -1
             self._refresh_views()
             self.analysis_panel.show_report(None, self.field)
@@ -296,10 +467,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Analysis complete. Adjust the design, then generate architecture.")
             return
         mesh, _response, used, warnings, report = result
+        self.proposal_panel.show_proposal(None)
         self.mesh = mesh
         self.report = report
         self.geometry_panel.set_parameters(used)
-        self.viewport.set_mesh(mesh)
+        self._show_editable_mesh(mesh)
         self._refresh_guides()
         notes = []
         if self.field is not None:
@@ -324,6 +496,10 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(False)
         self.audio_panel.set_busy(False)
         self.geometry_panel.set_busy(False)
+        self.proposal_panel.setEnabled(True)
+        self.pavilion_editor.setEnabled(True)
+        self._import_site_action.setEnabled(True)
+        self._clear_site_action.setEnabled(self.site_model is not None)
 
     def _refresh_guides(self) -> None:
         params = self.geometry_panel.parameters()
@@ -344,12 +520,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_overlay(self, params) -> None:
         if self.field is None:
-            self.viewport.set_overlay(None, None, params)
+            self.viewport.set_overlay(None, None, None, params)
             return
         settings = self.audio_panel.settings()
         time_s = self.player.position_seconds if settings.view_time_mode == "frame" else None
         values = self.field.display_map(settings.view_band, time_s, settings.view_smoothing)
-        self.viewport.set_overlay(self.field.azimuth_deg, values.max(axis=0), params)
+        self.viewport.set_overlay(self.field.azimuth_deg, self.field.elevation_deg, values, params)
 
     def _mark_analysis_stale(self) -> None:
         if self.field is None:
@@ -365,6 +541,9 @@ class MainWindow(QMainWindow):
         path, _filter = QFileDialog.getSaveFileName(self, "Save project", "soundform-project.json", "Soundform project (*.json)")
         if not path:
             return
+        recipe = self.proposal_panel.proposal
+        if recipe is not None and "recipe_version" not in recipe:
+            recipe = None
         try:
             save_project(
                 path,
@@ -374,6 +553,9 @@ class MainWindow(QMainWindow):
                 self.geometry_panel.parameters(),
                 self.field,
                 self.mesh,
+                site_path=str(self.site_model.path) if self.site_model else None,
+                recipe=recipe,
+                recipe_threshold=self.proposal_panel.applied_threshold if recipe is not None else None,
             )
         except (ExportError, OSError, SoundformError) as exc:
             QMessageBox.warning(self, "Could not save", str(exc))
@@ -390,6 +572,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could not open", str(exc))
             return
         self.player.stop()
+        self.proposal_panel.show_proposal(None)
         self.geometry_panel.set_parameters(record.design)
         self.audio_panel.apply_settings(record.analysis_settings)
         self.field = record.sound_field
@@ -397,6 +580,14 @@ class MainWindow(QMainWindow):
         self.report = None
         self.audio = None
         messages = list(record.warnings)
+        site = None
+        if record.site_path:
+            try:
+                site = load_site(record.site_path)
+                messages.extend(site.warnings)
+            except (ValueError, OSError) as exc:
+                messages.append(f"Could not reload the Rhino site: {exc}")
+        self._set_site(site)
         if record.audio_found and record.audio_path:
             try:
                 self.audio = load_audio(record.audio_path)
@@ -417,7 +608,11 @@ class MainWindow(QMainWindow):
             self._signature = self._signature_for(record.convention, record.analysis_settings)
         else:
             self._signature = None
-        self.viewport.set_mesh(self.mesh)
+        self._show_editable_mesh(self.mesh)
+        if record.recipe is not None:
+            self.proposal_panel.show_proposal(record.recipe)
+            self.proposal_panel.applied_threshold = record.recipe_threshold
+            self.proposal_panel.threshold.setValue(record.recipe_threshold)
         self._refresh_guides()
         if self.field is not None:
             self._refresh_views()
@@ -480,7 +675,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Wrote analysis CSV to {path}.")
 
     def _reset_project(self) -> None:
-        answer = QMessageBox.question(self, "Reset project", "Clear the recording, analysis, mesh, and design parameters?")
+        answer = QMessageBox.question(self, "Reset project", "Clear the Rhino site, recording, analysis, mesh, and design parameters?")
         if answer != QMessageBox.Yes:
             return
         self.player.stop()
@@ -490,16 +685,20 @@ class MainWindow(QMainWindow):
         self.report = None
         self._signature = None
         self.audio_panel.clear()
+        self.proposal_panel.show_proposal(None)
         self.geometry_panel.set_parameters(default_parameters())
-        self.viewport.set_mesh(None)
+        self._show_editable_mesh(None)
         self.analysis_panel.clear()
+        self._set_site(None)
         self._refresh_guides()
         self.statusBar().showMessage("Project reset.")
 
     def closeEvent(self, event) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self.statusBar().showMessage("Wait for the current task to finish before closing.")
+            event.ignore()
+            return
         self._closing = True
         self.player.stop()
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.wait(1500)
         self.viewport.shutdown()
         super().closeEvent(event)

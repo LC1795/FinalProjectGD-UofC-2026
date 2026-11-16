@@ -41,15 +41,15 @@ def stft_wxyz(
     nperseg: int,
     hop: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return frequencies (Hz), frame-centre times (s), and spectra shaped (4, F, T)."""
-    audio = np.asarray(wxyz, dtype=np.float64)
+    """Return frequencies (Hz), frame-centre times (s), and spectra shaped (channels, F, T)."""
+    audio = np.asarray(wxyz)
     if hop < 1 or nperseg < 16:
         raise AnalysisError("The STFT window is too short for this interval.")
     noverlap = nperseg - hop
     spectra = []
     frequencies = None
     times = None
-    for channel in range(4):
+    for channel in range(audio.shape[1]):
         frequencies, times, values = signal.stft(
             audio[:, channel],
             fs=sample_rate,

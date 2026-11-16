@@ -1,0 +1,79 @@
+{
+  "duration_seconds": 32,
+  "format": "Third-order ACN/SN3D (AmbiX)",
+  "microphone": {
+    "east_m": 0,
+    "north_m": 0,
+    "height_m": 1.6,
+    "faces": "north"
+  },
+  "bearing_reference": "0 degrees north, +90 west, 180 south, -90 east",
+  "traffic": [
+    {
+      "closest_s": 4,
+      "eastward_speed_m_s": 12,
+      "north_m": -19
+    },
+    {
+      "closest_s": 7,
+      "eastward_speed_m_s": -10,
+      "north_m": -23
+    },
+    {
+      "closest_s": 11,
+      "eastward_speed_m_s": 15,
+      "north_m": -19
+    },
+    {
+      "closest_s": 16,
+      "eastward_speed_m_s": -13,
+      "north_m": -23
+    },
+    {
+      "closest_s": 22,
+      "eastward_speed_m_s": 11,
+      "north_m": -19
+    },
+    {
+      "closest_s": 26,
+      "eastward_speed_m_s": -15,
+      "north_m": -23
+    },
+    {
+      "closest_s": 29,
+      "eastward_speed_m_s": 13,
+      "north_m": -19
+    }
+  ],
+  "train": {
+    "east_m": 26,
+    "southward_speed_m_s": 8.5,
+    "section_closest_s": [
+      17,
+      18.7
+    ]
+  },
+  "pond": {
+    "quadrant": "northwest",
+    "bird_onsets_s": [
+      [
+        2,
+        5.5,
+        9,
+        13,
+        23,
+        28,
+        30.5
+      ],
+      [
+        3,
+        7.4,
+        10,
+        14,
+        20.5,
+        25,
+        29
+      ]
+    ]
+  }
+}

@@ -16,7 +16,7 @@ import numpy as np
 from soundform.errors import GeometryError
 from soundform.models.project import DesignParameters
 
-EAR_HEIGHT_M = 1.5
+EAR_HEIGHT_M = 1.6
 
 
 def design_xy_to_sound_azimuth(dx: np.ndarray, dy: np.ndarray, rotation_ccw_deg: float) -> np.ndarray:
