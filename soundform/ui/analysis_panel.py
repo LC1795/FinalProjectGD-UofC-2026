@@ -3,13 +3,65 @@
 from __future__ import annotations
 
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from PySide6.QtWidgets import QLabel, QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import QLabel, QPlainTextEdit, QSizePolicy, QTabWidget, QVBoxLayout, QWidget
 
 from soundform.acoustics.protection_estimator import ProtectionReport
 from soundform.acoustics.sound_field import SoundField
 from soundform.ui.theme import apply_plot_style
+
+
+class FigureCanvas(QLabel):
+    """Render charts to an owned image without a live Qt plotting canvas."""
+
+    def __init__(self, figure):
+        super().__init__()
+        self.figure = figure
+        self._renderer = FigureCanvasAgg(figure)
+        self._dirty = True
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(320, 180)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.setScaledContents(True)
+        self._redraw = QTimer(self)
+        self._redraw.setSingleShot(True)
+        self._redraw.setInterval(70)
+        self._redraw.timeout.connect(self._render)
+
+    def draw_idle(self):
+        self._dirty = True
+        if self.isVisible():
+            self._redraw.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.draw_idle()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.draw_idle()
+
+    def _render(self):
+        if not self.isVisible() or not self._dirty:
+            return
+        self._dirty = False
+        width = max(320, min(2048, self.width()))
+        height = max(180, min(1600, self.height()))
+        dpi = self.figure.dpi
+        try:
+            self.figure.set_size_inches(width / dpi, height / dpi, forward=False)
+            self._renderer.draw()
+            # Copy the pixels so Qt never retains a pointer into Matplotlib's buffer.
+            rgba = self._renderer.buffer_rgba()
+            actual_height, actual_width, _ = rgba.shape
+            image = QImage(rgba, actual_width, actual_height, rgba.strides[0],
+                           QImage.Format_RGBA8888).copy()
+            self.setPixmap(QPixmap.fromImage(image))
+        except Exception as error:
+            self.setText(f"Could not draw this chart: {error}")
 
 
 class AnalysisPanel(QWidget):

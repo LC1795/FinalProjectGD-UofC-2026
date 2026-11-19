@@ -1,6 +1,6 @@
 """Import a layered Rhino site into a metre-based frame at the pavilion origin."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +24,8 @@ class SiteModel:
     meshes: dict[str, tuple[np.ndarray, np.ndarray]]
     sources: list[tuple[str, np.ndarray]]
     warnings: list[str]
+    origins: list[tuple[str, np.ndarray]] = field(default_factory=list)
+    objects: list[dict] = field(default_factory=list)
 
 
 def _xyz(point):
@@ -46,6 +48,7 @@ def load_site(path: str | Path) -> SiteModel:
         raise ValueError(f"Unsupported Rhino model units ({unit}). Set explicit model units in Rhino and save again.")
     layers = {layer.Index: layer.FullPath for layer in model.Layers}
     origins = []
+    objects = []
     sources = []
     warnings = []
     vertices = {name: [] for name in _MESH_LAYERS}
@@ -69,19 +72,22 @@ def load_site(path: str | Path) -> SiteModel:
                 raise ValueError(f"The {category} layer contains an invalid mesh face.")
             quads = connectivity[:, 2] != connectivity[:, 3]
             triangles = np.concatenate((connectivity[:, :3], connectivity[quads][:, (0, 2, 3)]))
+            objects.append({"name": obj.Attributes.Name or f"{category} {len(objects) + 1}",
+                            "layer": layer_path, "category": category,
+                            "vertices": coords, "faces": triangles})
             faces[category].append(triangles + offsets[category])
             vertices[category].append(coords)
             offsets[category] += len(coords)
         elif category == "Pavilion Origin" and isinstance(geom, rhino.Point):
-            origins.append(_xyz(geom.Location))
+            origins.append((obj.Attributes.Name or f"Pavilion origin {len(origins) + 1}", _xyz(geom.Location)))
         elif category == "Sound Sources" and isinstance(geom, rhino.Point):
             sources.append((obj.Attributes.Name or "Sound source", _xyz(geom.Location)))
         else:
             skipped[category] = skipped.get(category, 0) + 1
-    if len(origins) != 1:
-        raise ValueError(f"Place exactly one Rhino point on the Pavilion Origin layer. Found {len(origins)}.")
-    origin = np.asarray(origins[0], dtype=float)
-    if not np.isfinite(origin).all() or any(not np.isfinite(point).all() for _, point in sources):
+    if not origins:
+        raise ValueError("Place at least one Rhino point on the Pavilion Origin layer.")
+    origin = np.asarray(origins[0][1], dtype=float)
+    if any(not np.isfinite(point).all() for _, point in origins) or any(not np.isfinite(point).all() for _, point in sources):
         raise ValueError("A pavilion or sound-source point has invalid coordinates.")
     for category, count in skipped.items():
         expected = "mesh objects" if category in _MESH_LAYERS else "Rhino points"
@@ -90,5 +96,8 @@ def load_site(path: str | Path) -> SiteModel:
               for name in _MESH_LAYERS if vertices[name]}
     if "Terrain" not in meshes:
         warnings.append("No terrain mesh was found. The default ground grid is visible.")
+    for item in objects:
+        item["vertices"] = (item["vertices"] - origin) * scale
     return SiteModel(path, origin * scale, meshes,
-                     [(name, (np.asarray(point) - origin) * scale) for name, point in sources], warnings)
+                     [(name, (np.asarray(point) - origin) * scale) for name, point in sources], warnings,
+                     [(name, (np.asarray(point) - origin) * scale) for name, point in origins], objects)

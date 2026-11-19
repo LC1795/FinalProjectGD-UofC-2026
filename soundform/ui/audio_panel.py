@@ -49,6 +49,8 @@ class AudioPanel(QWidget):
     analysis_inputs_changed = Signal()
     open_requested = Signal(str)
     example_requested = Signal(str)
+    site_requested = Signal()
+    origin_changed = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -64,15 +66,21 @@ class AudioPanel(QWidget):
         title.setStyleSheet("font-size: 16px; font-weight: 700;")
         root.addWidget(title)
         buttons = QHBoxLayout()
+        self.site_button = QPushButton("Import Rhino")
+        self.site_button.setObjectName("primary")
+        self.site_button.clicked.connect(self.site_requested)
         self.import_button = QPushButton("Import WAV")
         self.import_button.setObjectName("primary")
+        self.import_button.setToolTip("Open an Ambisonic WAV recording.")
         self.import_button.clicked.connect(lambda *_args: self._import())
-        self.example_button = QPushButton("Site soundscape")
-        self.example_button.setToolTip("Generate a 32-second third-order scene with two-way traffic, a train, and a pond.")
-        self.example_button.clicked.connect(lambda *_args: self._example())
+        buttons.addWidget(self.site_button)
         buttons.addWidget(self.import_button)
-        buttons.addWidget(self.example_button)
         root.addLayout(buttons)
+        self.origins = QComboBox()
+        self.origins.setToolTip("Choose the listening and pavilion origin imported from Rhino.")
+        self.origins.setEnabled(False)
+        self.origins.currentIndexChanged.connect(self.origin_changed)
+        root.addWidget(self.origins)
 
         self.meta = QLabel("No recording loaded.")
         self.meta.setWordWrap(True)
@@ -306,7 +314,9 @@ class AudioPanel(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         self.analyze_button.setEnabled(not busy and self._can_analyze())
+        self.site_button.setEnabled(not busy)
         self.import_button.setEnabled(not busy)
+        self.origins.setEnabled(not busy and self.origins.count() > 0)
 
     def position_seconds(self) -> float:
         if self._duration <= 0:

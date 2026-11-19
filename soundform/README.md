@@ -132,3 +132,25 @@ soundform/
 - Sample rates outside 8 kHz–384 kHz are rejected.
 - Levels are dBFS or normalized energy. They are not dB SPL.
 - The three building modes are design responses to that directional score. They are buildable as meshes, not as predictions of insertion loss.
+
+
+## Cloud points and reconstruction
+
+After creating a cloud from the selected pavilion origins and analyzing audio, set **Point energy threshold** (0–1) in **Cloud**, then generate surface points. Only areas meeting that relative-energy cutoff receive points. Zero includes all energy levels. Density controls still determine how many points appear in eligible areas. Change the cutoff and regenerate to apply it.
+
+Expand **Delaunay mesh** or **Poisson reconstruction** to generate a separate mesh from the current points. Delaunay extracts the boundary of a 3D tetrahedralization: alpha 0 gives a convex hull, while positive alpha limits tetrahedron circumradius. Poisson uses oriented sample normals and a uniform-grid Poisson solver, with resolution 32–128; it smooths and may bridge unsampled areas. This implementation is not screened or adaptive-octree Poisson. Both methods run in the background and trim the result to the terrain. Each result appears in Layers. Changing cloud geometry or regenerating points clears previous reconstructions.
+
+Every layer group in **Layers** has a visibility checkbox. Hiding a layer affects display only; it does not remove geometry or exclude it from analysis. Visibility survives layer-list rebuilds during the current session.
+
+
+The Cloud panel has a collapsible **Voronoi mesh** section. Its button partitions the actual metaball surface into restricted Voronoi cells using existing cloud points as seeds. Each surface triangle is clipped to the nearest-site regions, so the result stays on the surface, follows concavities, and ends at the terrain intersection without creating interior walls or a bottom cap. Distances are Euclidean in 3D, rather than geodesic distances along the surface.
+
+Voronoi controls:
+- **Cell count limit:** maximum number of cloud points used as seeds (default 250). Zero uses all points. The actual number cannot exceed the available unique points. Subsampling preserves the sound-weighted distribution statistically.
+- **Cell gap:** approximate separation in metres between cells (default 0.08 m). Zero tiles the full surface; larger values leave openings between panels. Large gaps can eliminate small panels.
+- **Pattern seed:** repeatable random choice of seed points when subsampling. It has no effect when all points are used.
+- **Color cells individually:** distinguish the cells visually, or turn it off to show relative sound energy.
+
+Press Generate after changing settings. Voronoi results appear in their own layer and run in the background like other reconstructions.
+
+Layer groups start collapsed. Both layers and individual objects have visibility checkboxes. Parent-layer visibility and individual-object visibility are independent, so hiding and showing a layer preserves which of its objects were hidden. Pavilion-part visibility affects display only and retains the underlying design for editing and analysis.

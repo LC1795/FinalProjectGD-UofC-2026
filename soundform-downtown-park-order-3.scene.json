@@ -1,0 +1,185 @@
+{
+  "duration_seconds": 45,
+  "format": "Third-order ACN/SN3D (AmbiX)",
+  "synthetic": true,
+  "microphone": {
+    "east_m": 0,
+    "north_m": 0,
+    "height_m": 1.6,
+    "faces": "north",
+    "location": "deck in northeast park quadrant"
+  },
+  "park_bounds_m": {
+    "east": 20,
+    "west": -61,
+    "north": 20,
+    "south": -61
+  },
+  "basketball_court": {
+    "quadrant": "northwest",
+    "east_m": -37,
+    "north_m": -3
+  },
+  "services": {
+    "quadrant": "southwest",
+    "buildings_xy_m": [
+      [
+        -44,
+        -38
+      ],
+      [
+        -32,
+        -45
+      ]
+    ]
+  },
+  "hill": {
+    "quadrant": "southeast",
+    "east_m": 5,
+    "north_m": -31,
+    "source_height_m": 3
+  },
+  "tower": {
+    "east_m": 25,
+    "north_m": 0,
+    "storeys": 60
+  },
+  "west_road_distance_m_assumed": 65,
+  "events": [
+    {
+      "kind": "south road vehicle",
+      "closest_s": 2,
+      "eastward_speed_m_s": 10.5,
+      "north_m": -65
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 6,
+      "eastward_speed_m_s": -12,
+      "north_m": -69
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 10,
+      "eastward_speed_m_s": 10.5,
+      "north_m": -65
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 15,
+      "eastward_speed_m_s": -12,
+      "north_m": -69
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 19,
+      "eastward_speed_m_s": 10.5,
+      "north_m": -65
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 24,
+      "eastward_speed_m_s": -12,
+      "north_m": -69
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 29,
+      "eastward_speed_m_s": 10.5,
+      "north_m": -65
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 34,
+      "eastward_speed_m_s": -12,
+      "north_m": -69
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 39,
+      "eastward_speed_m_s": 10.5,
+      "north_m": -65
+    },
+    {
+      "kind": "south road vehicle",
+      "closest_s": 43,
+      "eastward_speed_m_s": -12,
+      "north_m": -69
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 4,
+      "northward_speed_m_s": 9,
+      "east_m": -65
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 9,
+      "northward_speed_m_s": -11,
+      "east_m": -69
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 14,
+      "northward_speed_m_s": 9,
+      "east_m": -65
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 20,
+      "northward_speed_m_s": -11,
+      "east_m": -69
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 26,
+      "northward_speed_m_s": 9,
+      "east_m": -65
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 31,
+      "northward_speed_m_s": -11,
+      "east_m": -69
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 37,
+      "northward_speed_m_s": 9,
+      "east_m": -65
+    },
+    {
+      "kind": "west road vehicle",
+      "closest_s": 42,
+      "northward_speed_m_s": -11,
+      "east_m": -69
+    },
+    {
+      "kind": "car horn",
+      "onsets_s": [
+        16.3,
+        16.95
+      ],
+      "road": "west"
+    },
+    {
+      "kind": "train carriage",
+      "closest_s": 22,
+      "eastward_speed_m_s": 13,
+      "north_m": 25
+    },
+    {
+      "kind": "train carriage",
+      "closest_s": 23.6,
+      "eastward_speed_m_s": 13,
+      "north_m": 25
+    },
+    {
+      "kind": "train carriage",
+      "closest_s": 25.2,
+      "eastward_speed_m_s": 13,
+      "north_m": 25
+    }
+  ],
+  "notes": "Procedural sound textures and sparse facade echoes. Distances guide source bearings and level attenuation. Geometry-based occlusion and calibrated SPL are not simulated."
+}

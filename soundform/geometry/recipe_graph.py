@@ -78,15 +78,28 @@ def validate_graph(proposal):
     if not isinstance(nodes, list) or not 1 <= len(nodes) <= 24:
         raise ValueError("Declare 1–24 graph nodes.")
     lookup = {}
+    normalized = []
     for p in parameters:
         name = p.get("name") if isinstance(p, dict) else None
         if not isinstance(name, str) or not re.fullmatch(PARAMETER_PATTERN, name) or name in lookup:
             raise ValueError(f"Invalid or duplicate graph parameter {name!r}.")
-        if not isinstance(p.get("label"), str) or not p["label"].strip() or p.get("unit") not in ("", "m", "°", "%"):
-            raise ValueError(f"Parameter {name} needs a label and supported unit.")
+        label = p.get("label")
+        label = " ".join(label.split()) if isinstance(label, str) else ""
+        label = (label or name.removeprefix("p_").replace("_", " ").capitalize())[:60]
+        unit = p.get("unit")
+        unit = unit.strip() if isinstance(unit, str) else ""
+        unit = {
+            "meter": "m", "meters": "m", "metre": "m", "metres": "m",
+            "deg": "°", "degree": "°", "degrees": "°",
+            "percent": "%", "percentage": "%",
+            "unitless": "", "none": "", "n/a": "", "count": "", "ratio": "",
+        }.get(unit.casefold(), unit)
+        if unit not in ("", "m", "°", "%"):
+            raise ValueError(f"Parameter {name} needs a supported unit: \"\", \"m\", \"°\", or \"%\".")
         low, high, value, step = (_number(p.get(key)) for key in ("min", "max", "value", "step"))
         if not low < high or not low <= value <= high or not 0.001 <= step <= high - low:
             raise ValueError(f"Invalid range, value or step for {name}.")
+        normalized.append({**p, "label": label, "unit": unit})
         lookup[name] = value
     outputs = []
     for index, node in enumerate(nodes):
@@ -122,7 +135,7 @@ def validate_graph(proposal):
     if "mesh" not in outputs:
         raise ValueError("The graph has no mesh output.")
     return {"recipe_version": 2, "rationale": proposal["rationale"][:1200],
-            "parameters": parameters, "nodes": nodes}
+            "parameters": normalized, "nodes": nodes}
 
 
 def _scalar(value, parameters):
