@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,9 +20,17 @@ def main():
     output = (root / args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    # A desktop shell can have other apps' DLL directories on PATH. In
+    # particular, Poppler's ICU DLL is incompatible with Qt's system ICU.
+    # Let PyInstaller's package hooks supply dependency directories instead.
+    build_environment = os.environ.copy()
+    windows = Path(os.environ["SystemRoot"])
+    build_environment["PATH"] = os.pathsep.join(map(str, [Path(sys.executable).parent,
+        Path(sys.base_prefix), windows / "System32", windows]))
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm",
                     "--distpath", str(output), "--workpath", str(root / ".build" / "pyinstaller"),
-                    str(root / "packaging" / "Soundform.spec")], cwd=root, check=True)
+                    str(root / "packaging" / "Soundform.spec")], cwd=root,
+                   env=build_environment, check=True)
     bundle = output / "Soundform"
     shutil.copy2(root / "packaging" / "START-HERE.txt", bundle)
     (bundle / "build-info.json").write_text(json.dumps({"revision": revision,

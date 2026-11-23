@@ -9,13 +9,14 @@ import traceback
 def smoke_test(report_path):
     # This mode never contacts an AI service or requires an audio device.
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    # Match normal startup: Qt must load before geometry/audio DLLs on Windows.
+    from PySide6.QtWidgets import QApplication
     import tempfile
     import numpy as np
     import pyvista as pv
     import rhino3dm
     import sounddevice
     import soundfile
-    from PySide6.QtWidgets import QApplication
     from soundform.branding import configure_branding
     from soundform.geometry.mesh_thickness import delaunay_frame, _tile_shell
     from soundform.ui.main_window import MainWindow
@@ -71,5 +72,11 @@ def run():
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    status = run()
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        # This short-lived dependency check has no user session to shut down.
+        # Avoid Qt/VTK static finalizers fighting during Python interpreter exit;
+        # failures above still produce a failure report and nonzero status.
+        os._exit(status)
+    raise SystemExit(status)
 

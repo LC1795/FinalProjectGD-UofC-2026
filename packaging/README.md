@@ -45,6 +45,6 @@ automatically. Tags beginning with `soundform-v` also trigger a build.
 The packaged check covers Qt creation, bundled icon, VTK geometry, Delaunay struts,
 Voronoi extrusion, WAV/Rhino round trips and audio-backend loading. It uses Qt's
 offscreen mode, so it does not validate GPU rendering, physical audio output,
-interactive workflows or AI credentials. Before sharing a release, open the EXE
+interactive workflows, normal application shutdown or AI credentials. Before sharing a release, open the EXE
 on a second Windows computer, import a site and recording, generate both meshes,
 thicken them, and export a result.
