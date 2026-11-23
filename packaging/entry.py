@@ -47,7 +47,9 @@ def smoke_test(report_path):
     Path(report_path).write_text(json.dumps({"ok": True, "checks": [
         "Qt window", "logo", "VTK", "Delaunay struts", "Voronoi shell",
         "WAV read/write", "Rhino read/write", "audio backend import"]}, indent=2))
-    return 0
+    # Exit before local QApplication/VTK objects start Python finalization.
+    # The success report has been closed and all checks have completed.
+    os._exit(0)
 
 
 def run():
