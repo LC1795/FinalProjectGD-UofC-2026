@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QTimer, QSize, Qt
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QSizePolicy, QTabWidget, QVBoxLayout, QWidget
 
 from soundform.acoustics.protection_estimator import ProtectionReport
@@ -14,18 +14,18 @@ from soundform.acoustics.sound_field import SoundField
 from soundform.ui.theme import apply_plot_style
 
 
-class FigureCanvas(QLabel):
-    """Render charts to an owned image without a live Qt plotting canvas."""
+class FigureCanvas(QWidget):
+    """Paint an owned chart image without letting image size drive layout."""
 
     def __init__(self, figure):
         super().__init__()
         self.figure = figure
         self._renderer = FigureCanvasAgg(figure)
         self._dirty = True
-        self.setAlignment(Qt.AlignCenter)
+        self._image = QImage()
+        self._error = ""
         self.setMinimumSize(320, 180)
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.setScaledContents(True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._redraw = QTimer(self)
         self._redraw.setSingleShot(True)
         self._redraw.setInterval(70)
@@ -59,9 +59,25 @@ class FigureCanvas(QLabel):
             actual_height, actual_width, _ = rgba.shape
             image = QImage(rgba, actual_width, actual_height, rgba.strides[0],
                            QImage.Format_RGBA8888).copy()
-            self.setPixmap(QPixmap.fromImage(image))
+            self._image = image
+            self._error = ""
         except Exception as error:
-            self.setText(f"Could not draw this chart: {error}")
+            self._error = f"Could not draw this chart: {error}"
+        self.update()
+
+    def sizeHint(self):
+        return QSize(620, 260)
+
+    def minimumSizeHint(self):
+        return QSize(320, 180)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        if self._error:
+            painter.setPen(self.palette().text().color())
+            painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self._error)
+        elif not self._image.isNull():
+            painter.drawImage(self.rect(), self._image)
 
 
 class AnalysisPanel(QWidget):

@@ -114,14 +114,14 @@ def test_point_threshold_clips_triangles_before_sampling():
     assert empty.n_points == 0
 
 
-def test_delaunay_and_poisson_reconstruct_oriented_sphere():
+def test_poisson_reconstruct_oriented_sphere():
     import pyvista as pv
     from soundform.geometry.analysis_envelope import scatter_surface_points
     from soundform.geometry.cloud_reconstruction import reconstruct_cloud
     surface = pv.Sphere(radius=3, theta_resolution=40, phi_resolution=30)
     surface.point_data["energy"] = np.full(surface.n_points, 0.6)
     points, _ = scatter_surface_points(surface, 15, 15)
-    for method in ("delaunay", "poisson"):
+    for method in ("poisson",):
         mesh = reconstruct_cloud(points, method, resolution=48)
         assert mesh.n_cells > 100
         assert np.isfinite(mesh.points).all()

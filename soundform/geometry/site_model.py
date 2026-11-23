@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-_MESH_LAYERS = ("Terrain", "Solids", "Vegetation")
+_MESH_LAYERS = ("Terrain", "Solids", "Vegetation", "Circulation")
 _LAYERS = {name.casefold(): name for name in (*_MESH_LAYERS, "Sound Sources", "Pavilion Origin")}
 _METRES = {
     "Microns": 1e-6, "Millimeters": 0.001, "Centimeters": 0.01, "Decimeters": 0.1,
@@ -30,6 +30,42 @@ class SiteModel:
 
 def _xyz(point):
     return point.X, point.Y, point.Z
+
+
+def _curve_vertices(curve, scale):
+    """Preserve polylines exactly; approximate other Rhino curves for display."""
+    polyline = curve.TryGetPolyline()
+    if polyline is not None:
+        coords = np.asarray([_xyz(p) for p in polyline], dtype=float)
+    else:
+        domain = curve.Domain
+        # Seed every curve span generously, then refine bends to 1 mm chord error.
+        count = min(4096, max(32, curve.SpanCount * 8))
+        ts = np.linspace(domain.T0, domain.T1, count + 1)
+        coords = []
+        def sample(a, b, pa, pb, depth=0):
+            params = a + (b-a)*np.array([.25, .5, .75])
+            q = np.array([_xyz(curve.PointAt(float(t))) for t in params])
+            chord = pb-pa
+            den = float(chord@chord)
+            fraction = np.clip((q-pa)@chord/max(den, 1e-30), 0, 1)
+            error = np.linalg.norm(q-(pa+fraction[:, None]*chord), axis=1).max()*scale
+            if error > .001 and depth < 8:
+                mid = (a+b)/2
+                sample(a, mid, pa, q[1], depth+1)
+                sample(mid, b, q[1], pb, depth+1)
+            else:
+                coords.append(pa)
+        for a, b in zip(ts[:-1], ts[1:]):
+            sample(a, b, np.array(_xyz(curve.PointAt(float(a)))),
+                   np.array(_xyz(curve.PointAt(float(b)))))
+        coords.append(np.array(_xyz(curve.PointAtEnd)))
+        coords = np.asarray(coords, dtype=float)
+    if len(coords) < 2 or not np.isfinite(coords).all():
+        raise ValueError("Circulation contains an invalid or empty Rhino curve.")
+    if curve.IsClosed and not np.allclose(coords[0], coords[-1], rtol=0, atol=1e-12):
+        coords = np.vstack([coords, coords[0]])
+    return coords
 
 
 def load_site(path: str | Path) -> SiteModel:
@@ -78,6 +114,12 @@ def load_site(path: str | Path) -> SiteModel:
             faces[category].append(triangles + offsets[category])
             vertices[category].append(coords)
             offsets[category] += len(coords)
+        elif category == "Circulation" and isinstance(geom, rhino.Curve):
+            coords = _curve_vertices(geom, scale)
+            objects.append({"name": obj.Attributes.Name or f"Circulation {len(objects) + 1}",
+                            "layer": layer_path, "category": category, "vertices": coords,
+                            "faces": np.empty((0, 3), dtype=np.int64),
+                            "lines": np.r_[len(coords), np.arange(len(coords))].astype(np.int64)})
         elif category == "Pavilion Origin" and isinstance(geom, rhino.Point):
             origins.append((obj.Attributes.Name or f"Pavilion origin {len(origins) + 1}", _xyz(geom.Location)))
         elif category == "Sound Sources" and isinstance(geom, rhino.Point):
@@ -90,7 +132,8 @@ def load_site(path: str | Path) -> SiteModel:
     if any(not np.isfinite(point).all() for _, point in origins) or any(not np.isfinite(point).all() for _, point in sources):
         raise ValueError("A pavilion or sound-source point has invalid coordinates.")
     for category, count in skipped.items():
-        expected = "mesh objects" if category in _MESH_LAYERS else "Rhino points"
+        expected = ("Rhino curves or mesh objects" if category == "Circulation" else
+                    "mesh objects" if category in _MESH_LAYERS else "Rhino points")
         warnings.append(f"{category}: skipped {count} unsupported object(s). Use {expected}.")
     meshes = {name: ((np.concatenate(vertices[name]) - origin) * scale, np.concatenate(faces[name]))
               for name in _MESH_LAYERS if vertices[name]}

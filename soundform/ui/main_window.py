@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from PySide6.QtCore import QSettings, QThread, Qt, QTimer, Signal
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
+    QComboBox,
     QLabel,
     QCheckBox,
     QVBoxLayout,
@@ -27,7 +31,6 @@ from PySide6.QtWidgets import (
 )
 
 from soundform.acoustics.ambisonic_decoder import decode_foa
-from soundform.acoustics.protection_estimator import estimate_protection
 from soundform.acoustics.sound_field import analyze_file
 from soundform.audio.loader import load_audio
 from soundform.audio.playback import MonitorPlayer, average_channel_downmix, stereo_monitor_downmix
@@ -41,7 +44,6 @@ from soundform.export.project_io import (
     load_project,
     save_project,
 )
-from soundform.geometry.generate import generate_architecture
 from soundform.geometry.pavilion_edit import edit_mesh, selected_mesh
 from soundform.geometry.site_model import load_site
 from soundform.geometry.cloud_reconstruction import reconstruct_cloud
@@ -49,10 +51,11 @@ from soundform.geometry.analysis_envelope import clip_to_terrain
 from soundform.geometry.proposal import evaluate_proposal, screening_percent
 from soundform.models.project import AnalysisSettings, default_parameters
 from soundform.ui.hex_layout import HexLayout
+from soundform.ui.layer_tree_state import preserve_tree, STATE_ROLE
 from soundform.ui.analysis_panel import AnalysisPanel
 from soundform.ui.audio_panel import AudioPanel
-from soundform.ui.geometry_controls import GeometryPanel
-from soundform.ui.viewport import Viewport
+from soundform.ui.design_state import DesignState
+from soundform.ui.viewport import Viewport, reconstruction_label
 from soundform.ui.pavilion_editor import PavilionEditor
 from soundform.ui.proposal_panel import ProposalPanel
 
@@ -72,13 +75,25 @@ class _Worker(QThread):
             self.failed.emit(str(exc))
 
 
-class MainWindow(QMainWindow):
+from soundform.ui.layer_actions import LayerActionsMixin
+from soundform.ui.cloud_controls import CloudControlsMixin
+from soundform.ui.selection_actions import SelectionActionsMixin
+from soundform.ui.export_panel import ExportPanelMixin
+from soundform.ui.thickness_controls import ThicknessControlsMixin
+from soundform.ui.drawing_actions import DrawingActionsMixin
+
+
+class MainWindow(DrawingActionsMixin, ThicknessControlsMixin, ExportPanelMixin, SelectionActionsMixin, CloudControlsMixin, LayerActionsMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Soundform")
         self.resize(1440, 900)
         self.audio = None
         self.site_model = None
+        self._layer_clipboard = []
+        self._scene_objects = {}
+        self._empty_layers = set()
+        self._pending_origin_settings = {}
         self.field = None
         self.mesh = None
         self.report = None
@@ -92,7 +107,7 @@ class MainWindow(QMainWindow):
 
         self.audio_panel = AudioPanel()
         self.viewport = Viewport()
-        self.geometry_panel = GeometryPanel()
+        self.design_state = DesignState()
         self.pavilion_editor = PavilionEditor()
         self.pavilion_editor.show_mesh(None)
         self._mesh_undo = []
@@ -127,76 +142,46 @@ class MainWindow(QMainWindow):
         origin_form = QFormLayout(self.origin_form_host)
         self.origin_radius = QDoubleSpinBox()
         self.origin_radius.setRange(0.5, 150)
+        self.origin_radius.setValue(3)
         self.origin_radius.setSuffix(" m")
         self.origin_response = QDoubleSpinBox()
         self.origin_response.setRange(0, 5)
         self.origin_response.setSingleStep(0.1)
+        self.origin_xyz = []
+        for axis in "XYZ":
+            box = self._number(0, -10000000, 10000000, " m")
+            box.setToolTip("Local site coordinate in metres, relative to the imported reference origin.")
+            box.editingFinished.connect(self._edit_origin_position)
+            self.origin_xyz.append(box)
+            origin_form.addRow(axis, box)
         origin_form.addRow("Sphere radius", self.origin_radius)
         origin_form.addRow("Design response weight", self.origin_response)
         self.origin_form_host.hide()
         properties_layout.insertWidget(1, self.origin_form_host)
-        cloud = QWidget()
-        cloud_layout = QVBoxLayout(cloud)
-        self.cloud_selection = QLabel("Select pavilion origins in Layers. Ctrl-click to select several.")
-        self.cloud_selection.setWordWrap(True)
-        cloud_layout.addWidget(self.cloud_selection)
-        self.create_cloud = QPushButton("Create metaball from selected origins")
-        cloud_layout.addWidget(self.create_cloud)
-        cloud_form = QFormLayout()
-        self.cloud_strength = QDoubleSpinBox()
-        self.cloud_strength.setRange(0.1, 3)
-        self.cloud_strength.setValue(1)
-        self.cloud_strength.setSingleStep(0.1)
-        self.cloud_strength.setToolTip("Higher strength thickens bridges and joins spheres farther apart.")
-        cloud_form.addRow("Connection strength", self.cloud_strength)
-        self.cloud_radius_scale = QDoubleSpinBox()
-        self.cloud_radius_scale.setRange(0.25, 4)
-        self.cloud_radius_scale.setValue(1)
-        self.cloud_radius_scale.setSingleStep(0.1)
-        cloud_form.addRow("Radius scale", self.cloud_radius_scale)
-        self.cloud_opacity = QDoubleSpinBox()
-        self.cloud_opacity.setRange(0.05, 1)
-        self.cloud_opacity.setValue(0.28)
-        self.cloud_opacity.setSingleStep(0.05)
-        cloud_form.addRow("Opacity", self.cloud_opacity)
-        self.cloud_quiet_density = QDoubleSpinBox()
-        self.cloud_quiet_density.setRange(0, 100)
-        self.cloud_quiet_density.setValue(0.2)
-        self.cloud_quiet_density.setSuffix(" points/m²")
-        self.cloud_loud_density = QDoubleSpinBox()
-        self.cloud_loud_density.setRange(0, 100)
-        self.cloud_loud_density.setValue(4)
-        self.cloud_loud_density.setSuffix(" points/m²")
-        cloud_form.addRow("Quiet-area density", self.cloud_quiet_density)
-        cloud_form.addRow("Loud-area density", self.cloud_loud_density)
-        self.cloud_energy_threshold = QDoubleSpinBox()
-        self.cloud_energy_threshold.setRange(0, 1)
-        self.cloud_energy_threshold.setDecimals(3)
-        self.cloud_energy_threshold.setSingleStep(0.05)
-        self.cloud_energy_threshold.setToolTip("Generate points only where sampled relative energy reaches this value.")
-        cloud_form.addRow("Point energy threshold", self.cloud_energy_threshold)
-        cloud_layout.addLayout(cloud_form)
-        self.scatter_cloud = QPushButton("Generate sound-weighted surface points")
-        cloud_layout.addWidget(self.scatter_cloud)
-        self.cloud_points_status = QLabel("Create a metaball and analyze audio to generate points.")
-        self.cloud_points_status.setWordWrap(True)
-        cloud_layout.addWidget(self.cloud_points_status)
+        cloud, generate = self._build_cloud_controls()
+        generate_layout = self.generate_layout
         for title, method in (("Delaunay mesh", "delaunay"), ("Poisson reconstruction", "poisson"), ("Voronoi mesh", "voronoi")):
             toggle = QToolButton()
             toggle.setText(title)
             toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             toggle.setCheckable(True)
             toggle.setArrowType(Qt.RightArrow)
-            cloud_layout.addWidget(toggle)
+            generate_layout.addWidget(toggle)
             body = QWidget()
             form = QFormLayout(body)
             if method == "delaunay":
-                self.delaunay_alpha = QDoubleSpinBox()
-                self.delaunay_alpha.setRange(0, 500)
-                self.delaunay_alpha.setSingleStep(0.5)
-                self.delaunay_alpha.setSuffix(" m")
-                self.delaunay_alpha.setToolTip("Zero produces the convex hull. Positive alpha restricts tetrahedron size.")
-                form.addRow("Alpha radius (0 = hull)", self.delaunay_alpha)
+                hint = QLabel("Connect existing points along the metaball surface. Sound controls point density only.")
+                hint.setWordWrap(True)
+                form.addRow(hint)
+                self.delaunay_max_edge = QDoubleSpinBox()
+                self.delaunay_max_edge.setRange(0, 1000000)
+                self.delaunay_max_edge.setDecimals(3)
+                self.delaunay_max_edge.setSingleStep(0.5)
+                self.delaunay_max_edge.setValue(2.5)
+                self.delaunay_max_edge.setSuffix(" m")
+                self.delaunay_max_edge.setSpecialValueText("Unlimited")
+                self.delaunay_max_edge.setToolTip("Discard whole triangles if any estimated surface edge distance exceeds this cap. Zero disables the limit.")
+                form.addRow("Maximum edge distance", self.delaunay_max_edge)
             elif method == "poisson":
                 self.poisson_resolution = QSpinBox()
                 self.poisson_resolution.setRange(32, 128)
@@ -218,12 +203,20 @@ class MainWindow(QMainWindow):
                 self.voronoi_gap.setSuffix(" m")
                 self.voronoi_gap.setToolTip("Approximate surface gap between neighboring cells. Zero creates a continuous tiled surface.")
                 form.addRow("Cell gap", self.voronoi_gap)
+                self.voronoi_max_reach = self._number(1.25, 0, 1000000, " m")
+                self.voronoi_max_reach.setSpecialValueText("Unlimited")
+                self.voronoi_max_reach.setToolTip("Maximum straight-line 3D distance from the cell's generating point. Sparse areas become holes. Zero disables the cap.")
+                form.addRow("Maximum cell reach", self.voronoi_max_reach)
                 self.voronoi_seed = QSpinBox()
                 self.voronoi_seed.setRange(0, 999999)
                 self.voronoi_seed.setValue(42)
                 self.voronoi_seed.setToolTip("Changes which cloud points are used when the cell limit is below the available point count.")
                 form.addRow("Pattern seed", self.voronoi_seed)
-                self.voronoi_colors = QCheckBox("Color cells individually")
+                self.voronoi_preserve_circulation = QCheckBox("Preserve circulation openings")
+                self.voronoi_preserve_circulation.setChecked(True)
+                self.voronoi_preserve_circulation.setToolTip("Cut the Circulation curves' pipe radii out of tiles, even if surrounding cells grow across the opening.")
+                form.addRow(self.voronoi_preserve_circulation)
+                self.voronoi_colors = QCheckBox("Color by center sound intensity")
                 self.voronoi_colors.setChecked(True)
                 form.addRow(self.voronoi_colors)
                 note = QLabel("Cells follow the metaball surface using nearest-point distance in 3D. Regenerate after changing these settings.")
@@ -232,24 +225,28 @@ class MainWindow(QMainWindow):
             button = QPushButton("Generate " + title.lower())
             button.clicked.connect(lambda checked=False, kind=method: self._reconstruct_cloud(kind))
             form.addRow(button)
+            self._add_thickness_controls(form,method)
             body.hide()
             toggle.toggled.connect(
                 lambda opened, content=body, tab=toggle: (
                     content.setVisible(opened), tab.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)))
-            cloud_layout.addWidget(body)
-        cloud_layout.addStretch()
+            generate_layout.addWidget(body)
+        generate_layout.addStretch()
         self.layers_tree = QTreeWidget()
         self.layers_tree.setHeaderLabels(["Layers and objects"])
+        self.layers_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.layers_tree.customContextMenuRequested.connect(self._layer_context_menu)
         self.layers_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        export_panel = self._build_export_panel()
         self.hex_layout = HexLayout(self.viewport, [
             ("AI pavilion", self.proposal_panel),
             ("Properties", properties_host),
-            ("View", self.viewport.view_controls),
             ("Analysis", self.analysis_panel),
             ("Audio", self.audio_panel),
-            ("Manual", self.geometry_panel),
             ("Cloud", cloud),
             ("Layers", self.layers_tree),
+            ("Generate", generate),
+            ("Export", export_panel),
         ])
         self.setCentralWidget(self.hex_layout)
 
@@ -270,6 +267,18 @@ class MainWindow(QMainWindow):
         self._timer.start()
 
     def _wire(self) -> None:
+        self.hex_layout.drawing_tool_requested.connect(self._start_drawing)
+        self.viewport.geometry_created.connect(self._commit_drawing)
+        self.viewport.drawing_hint.connect(self.statusBar().showMessage)
+        self._drawing_shortcuts=[]
+        for key,slot in ((Qt.Key_Return,self.viewport.finish_drawing),
+                         (Qt.Key_Enter,self.viewport.finish_drawing),
+                         (Qt.Key_Escape,lambda:(self.viewport.cancel_drawing(),self.statusBar().showMessage("Drawing cancelled.")))):
+            shortcut=QShortcut(QKeySequence(key),self)
+            shortcut.activated.connect(slot)
+            shortcut.setEnabled(False)
+            self.viewport.drawing_mode_changed.connect(lambda mode,s=shortcut:s.setEnabled(bool(mode)))
+            self._drawing_shortcuts.append(shortcut)
         self.audio_panel.site_requested.connect(self._import_site)
         self.audio_panel.origin_changed.connect(self._select_origin)
         self.viewport.object_selected.connect(self._select_viewport_object)
@@ -280,10 +289,13 @@ class MainWindow(QMainWindow):
         self.cloud_radius_scale.valueChanged.connect(self._change_cloud_strength)
         self.cloud_opacity.valueChanged.connect(self._change_cloud_strength)
         self.layers_tree.itemSelectionChanged.connect(self._layers_selection)
+        self.viewport.box_selected.connect(self._box_select)
+        self.viewport.delete_requested.connect(self._delete_selected_geometry)
         self.layers_tree.itemChanged.connect(self._layer_visibility_changed)
         self.origin_radius.valueChanged.connect(self._edit_origin_properties)
         self.origin_response.valueChanged.connect(self._edit_origin_properties)
         self.viewport.envelope_updated.connect(self._update_surface_properties)
+        self.viewport.reconstructions_changed.connect(self._update_thickness_controls)
         self.proposal_panel.threshold.valueChanged.connect(self._update_surface_properties)
         self.audio_panel.open_requested.connect(self._open_audio)
         self.audio_panel.example_requested.connect(self._write_example)
@@ -294,12 +306,10 @@ class MainWindow(QMainWindow):
         self.audio_panel.seek_requested.connect(self._seek)
         self.audio_panel.display_changed.connect(self._refresh_views)
         self.audio_panel.analysis_inputs_changed.connect(self._mark_analysis_stale)
-        self.geometry_panel.generate_requested.connect(self._generate)
         self.pavilion_editor.selection_changed.connect(self._highlight_pavilion)
         self.pavilion_editor.apply_requested.connect(self._edit_pavilion)
         self.pavilion_editor.delete_requested.connect(lambda: self._edit_pavilion(delete=True))
         self.pavilion_editor.undo_requested.connect(self._undo_pavilion)
-        self.geometry_panel.guides_changed.connect(self._refresh_guides)
         self.proposal_panel.generate_requested.connect(self._generate_proposal)
         self.proposal_panel.dimensions_changed.connect(lambda: self._proposal_timer.start())
 
@@ -322,7 +332,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Reset project", self._reset_project)
         file_menu.addAction("Quit", self.close)
         view_menu = self.menuBar().addMenu("View")
-        for label, name in (("Top", "top"), ("Front", "front"), ("Side", "side"), ("Perspective", "perspective")):
+        for label, name in (("Top", "top"), ("Front", "front"), ("Right", "right"), ("Perspective", "perspective")):
             view_menu.addAction(label, lambda checked=False, view=name: self.viewport.set_view(view))
         view_menu.addAction("Reset view", self.viewport.reset_view)
         view_menu.addSeparator()
@@ -340,6 +350,11 @@ class MainWindow(QMainWindow):
             self._start("site", lambda: load_site(path))
 
     def _set_site(self, model) -> None:
+        if self.viewport._drawing_mode:
+            self.viewport.cancel_drawing()
+        if model is not self.site_model:
+            self._reset_layer_tree = True
+            self.viewport._deleted_spheres.clear()
         self.site_model = model
         self.audio_panel.origins.blockSignals(True)
         self.audio_panel.origins.clear()
@@ -354,10 +369,11 @@ class MainWindow(QMainWindow):
         self.metaball_box.setChecked(False)
         self.metaball_box.setEnabled(False)
         self.metaball_box.blockSignals(False)
+        self._sync_cloud_tables()
         self._rebuild_layers()
         self._select_viewport_object(None)
         self._clear_site_action.setEnabled(model is not None)
-        self._refresh_overlay(self.geometry_panel.parameters())
+        self._refresh_overlay(self.design_state.parameters())
 
     def _collapse_panels(self, collapsed):
         self.hex_layout.set_collapsed(collapsed)
@@ -366,58 +382,81 @@ class MainWindow(QMainWindow):
         if self.site_model is None or not 0 <= index < len(self.site_model.origins):
             return
         name, point = self.site_model.origins[index]
-        params = self.geometry_panel.parameters()
+        params = self.design_state.parameters()
         params.protected_center_x, params.protected_center_y = map(float, point[:2])
-        self.geometry_panel.set_parameters(params)
+        self.design_state.set_parameters(params)
         self._refresh_guides()
         self.statusBar().showMessage(f"Active pavilion origin: {name}. Generate to build at this point.")
 
     def _rebuild_layers(self):
         self._syncing_layers = True
-        self.layers_tree.clear()
-        groups = {}
-        def add(layer, label, data):
-            if layer not in groups:
-                groups[layer] = QTreeWidgetItem(self.layers_tree, [layer])
-                groups[layer].setData(0, Qt.UserRole + 1, layer)
-                groups[layer].setFlags(groups[layer].flags() | Qt.ItemIsUserCheckable)
-                groups[layer].setCheckState(
-                    0, Qt.Checked if self.viewport._layer_visibility.get(layer, True) else Qt.Unchecked)
-            item = QTreeWidgetItem(groups[layer], [label])
-            item.setData(0, Qt.UserRole, data)
-            key = self.viewport.object_visibility_key(data)
-            item.setData(0, Qt.UserRole + 2, key)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(0, Qt.Checked if self.viewport._object_visibility.get(key, True) else Qt.Unchecked)
-            if data.get("category") == "Pavilion Origin" and data.get("origin_index") in self._selected_origins:
-                item.setSelected(True)
-            return item
-        if self.site_model is not None:
-            for obj in self.site_model.objects:
-                add(obj["layer"], obj["name"], obj)
-            for i, (name, point) in enumerate(self.site_model.origins):
-                data = {"name": name, "category": "Pavilion Origin", "point": point, "origin_index": i}
-                add("Pavilion Origin", name, data)
-                add("Analysis spheres", f"{name} — sphere",
-                    {**data, "category": "Analysis sphere"})
-            for name, point in self.site_model.sources:
-                add("Sound Sources", name, {"name": name, "category": "Sound Sources", "point": point})
-        if self.mesh is not None:
-            from soundform.geometry.pavilion_edit import part_labels
-            labels = part_labels(self.mesh)
-            for label in sorted(set(labels)):
-                cell = next(i for i, value in enumerate(labels) if value == label)
-                add("Pavilion", label, {"name": label, "category": "Pavilion", "cell": cell})
-        if self.viewport._cloud_members:
-            add("Cloud", "Metaball", {"name": "Metaball", "category": "Analysis envelope"})
-        if self.viewport._cloud_points is not None:
-            add("Cloud", "Surface points", {"name": "Surface points", "category": "Surface points"})
-        for method, mesh in self.viewport._reconstructions.items():
-            label = method.title() + " mesh"
-            add(label, label, {"name": label, "category": "Reconstruction",
-                              "vertices": mesh.points, "faces": mesh.faces.reshape(-1, 4)[:, 1:]})
-        self.layers_tree.collapseAll()
-        self._syncing_layers = False
+        try:
+            with preserve_tree(self.layers_tree,reset=getattr(self,"_reset_layer_tree",False)):
+                self.layers_tree.clear()
+                groups = {}
+                key_counts = {}
+                def add(layer, label, data):
+                    if layer not in groups:
+                        groups[layer] = QTreeWidgetItem(self.layers_tree, [layer])
+                        groups[layer].setData(0, Qt.UserRole + 1, layer)
+                        groups[layer].setFlags(groups[layer].flags() | Qt.ItemIsUserCheckable)
+                        groups[layer].setCheckState(
+                            0, Qt.Checked if self.viewport._layer_visibility.get(layer, True) else Qt.Unchecked)
+                    item = QTreeWidgetItem(groups[layer], [label])
+                    item.setData(0, Qt.UserRole, data)
+                    # Object coordinates and changing actor indices are not identities.
+                    identity = (data.get("category"),layer,data.get("name"),data.get("_scene_id"),data.get("_method"))
+                    if "_site_index" in data:
+                        identity += (id(self.site_model.objects[data["_site_index"]]),)
+                    occurrence = key_counts.get(identity,0)
+                    key_counts[identity] = occurrence+1
+                    item.setData(0,STATE_ROLE,("object",*identity,occurrence))
+                    key = self.viewport.object_visibility_key(data)
+                    item.setData(0, Qt.UserRole + 2, key)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(0, Qt.Checked if self.viewport._object_visibility.get(key, True) else Qt.Unchecked)
+                    if data.get("category") == "Pavilion Origin" and data.get("origin_index") in self._selected_origins:
+                        item.setSelected(True)
+                    return item
+                if self.site_model is not None:
+                    for i, obj in enumerate(self.site_model.objects):
+                        add(obj["layer"], obj["name"], {**obj, "_site_index": i, "_actor": f"context-object-{i}"})
+                    for i, (name, point) in enumerate(self.site_model.origins):
+                        data = {"name": name, "category": "Pavilion Origin", "point": point, "origin_index": i}
+                        add("Pavilion Origin", name, data)
+                        add("Analysis spheres", f"{name} — sphere",
+                            {**data, "category": "Analysis sphere"})
+                    for i, (name, point) in enumerate(self.site_model.sources):
+                        add("Sound Sources", name, {"name": name, "category": "Sound Sources", "point": point, "_source_index": i, "_actor": f"source-{i}"})
+                if self.mesh is not None:
+                    from soundform.geometry.pavilion_edit import part_labels
+                    labels = part_labels(self.mesh)
+                    for label in sorted(set(labels)):
+                        cell = next(i for i, value in enumerate(labels) if value == label)
+                        add("Pavilion", label, {"name": label, "category": "Pavilion", "cell": cell})
+                if self.viewport._cloud_members:
+                    add("Cloud", "Metaball", {"name": "Metaball", "category": "Analysis envelope"})
+                if self.viewport._cloud_points is not None:
+                    add("Cloud", "Surface points", {"name": "Surface points", "category": "Surface points"})
+                for method, mesh in self.viewport._reconstructions.items():
+                    label = reconstruction_label(method)
+                    add(label, label, {"name": label, "category": "Reconstruction", "layer": label, "_method": method, "_actor": "reconstruction-" + method,
+                                      "vertices": mesh.points, "faces": mesh.faces.reshape(-1, 4)[:, 1:]})
+                for identifier, obj in self._scene_objects.items():
+                    data = self.viewport._pick_objects.get("scene-" + identifier)
+                    if data is not None:
+                        add(obj["layer"], obj["name"], data)
+                for layer in sorted(self._empty_layers - groups.keys()):
+                    root = QTreeWidgetItem(self.layers_tree, [layer])
+                    root.setData(0, Qt.UserRole + 1, layer)
+                    root.setFlags(root.flags() | Qt.ItemIsUserCheckable)
+                    root.setCheckState(0, Qt.Checked if self.viewport._layer_visibility.get(layer, True) else Qt.Unchecked)
+                self._update_thickness_controls()
+                self._refresh_export_tree()
+                self._refresh_drawing_layers()
+        finally:
+            self._reset_layer_tree = False
+            self._syncing_layers = False
 
     def _layer_visibility_changed(self, item, column):
         if self._syncing_layers:
@@ -432,23 +471,99 @@ class MainWindow(QMainWindow):
 
     def _reconstruct_cloud(self, method):
         points = self.viewport._cloud_points
-        if points is None or points.n_points < 12:
-            QMessageBox.information(self, "Cloud reconstruction", "Generate at least 12 cloud points first.")
+        minimum = 12
+        if points is None or points.n_points < minimum:
+            QMessageBox.information(self, "Cloud reconstruction", f"Generate at least {minimum} cloud points first.")
             return
         source_id = id(points)
         snapshot = points.copy()
         terrain = None if self.viewport._terrain is None else self.viewport._terrain.copy()
         boundary = None if self.viewport._cloud_surface is None else self.viewport._cloud_surface.copy()
-        alpha = self.delaunay_alpha.value()
+        delaunay_options = dict(max_edge=self.delaunay_max_edge.value())
         resolution = self.poisson_resolution.value()
         voronoi_options = dict(voronoi_cells=self.voronoi_cells.value(),
-                               voronoi_gap=self.voronoi_gap.value(), voronoi_seed=self.voronoi_seed.value())
+                               voronoi_gap=self.voronoi_gap.value(), voronoi_seed=self.voronoi_seed.value(),
+                               voronoi_max_reach=self.voronoi_max_reach.value(),
+                               preserve_circulation=self.voronoi_preserve_circulation.isChecked(),
+                               circulation_curves=[(o["vertices"].copy(), o["lines"].copy(), o.get("circulation_radius", 2))
+                                   for o in self.site_model.objects
+                                   if o["category"] == "Circulation" and "lines" in o] if self.site_model else [])
 
         def job():
-            mesh = reconstruct_cloud(snapshot, method, alpha, resolution, boundary=boundary, **voronoi_options)
-            return method, clip_to_terrain(mesh, terrain).triangulate(), source_id
+            if method == "delaunay" and boundary is None:
+                raise ValueError("Generate the metaball surface first.")
+            mesh = reconstruct_cloud(snapshot, method, resolution=resolution, boundary=boundary,
+                                     **voronoi_options, **delaunay_options)
+            return method, mesh if method == "delaunay" else clip_to_terrain(mesh, terrain).triangulate(), source_id
 
         self._start("cloud-reconstruction", job)
+
+    def _delete_selected_geometry(self):
+        if self._worker is not None and self._worker.isRunning():
+            self.statusBar().showMessage("Wait for the current task before editing the scene.")
+            return
+        entries=[]
+        if self._selected_object and self._selected_object.get("from_layers"):
+            for node in self.layers_tree.selectedItems():
+                entries.extend(self._layer_entries(node))
+        elif self._selected_object:
+            entries=[self._selected_object]
+            if "origin_index" in self._selected_object:
+                entries=[{**self._selected_object,"origin_index":i} for i in self._selected_origins]
+        if entries:
+            if any(d["category"]=="Pavilion" and "name" not in d for d in entries):
+                from soundform.geometry.pavilion_edit import part_labels
+                entries=[{**d,"name":part_labels(self.mesh)[d["cell"]]} if d["category"]=="Pavilion" and "name" not in d else d for d in entries]
+            self._delete_entries(entries)
+
+    def _box_select(self,rectangle,extend=False):
+        from PySide6.QtCore import QPointF
+        from vtkmodules.vtkRenderingCore import vtkCoordinate
+        coordinate=vtkCoordinate()
+        coordinate.SetCoordinateSystemToWorld()
+        viewport=self.viewport
+        ratio=viewport.plotter.interactor.devicePixelRatioF()
+        height=viewport.plotter.interactor.height()
+        self._syncing_layers=True
+        try:
+            iterator=QTreeWidgetItemIterator(self.layers_tree)
+            while iterator.value():
+                node=iterator.value()
+                data=node.data(0,Qt.UserRole)
+                iterator+=1
+                if not data:
+                    continue
+                category=data["category"]
+                actor_name=data.get("_actor")
+                if "origin_index" in data:
+                    actor_name=("analysis-sphere-" if category=="Analysis sphere" else "origin-")+str(data["origin_index"])
+                actor_name=actor_name or {"Pavilion":"architecture","Surface points":"cloud-points","Analysis envelope":"sound-field"}.get(category)
+                actor=viewport.plotter.actors.get(actor_name)
+                hit=False
+                if actor is not None and actor.GetVisibility():
+                    datasets=self._selection_datasets([data])
+                    if datasets:
+                        points=np.asarray(datasets[0][1].points)
+                        low,high=points.min(axis=0),points.max(axis=0)
+                        corners=np.array([[x,y,z] for x in (low[0],high[0]) for y in (low[1],high[1]) for z in (low[2],high[2])])
+                        projected=[]
+                        for corner in corners:
+                            coordinate.SetValue(*corner)
+                            x,y=coordinate.GetComputedDoubleDisplayValue(viewport.plotter.renderer)
+                            projected.append(rectangle.contains(QPointF(x/ratio,height-y/ratio).toPoint()))
+                        hit=all(projected)
+                node.setSelected(hit or (extend and node.isSelected()))
+        finally:
+            self._syncing_layers=False
+        self._layers_selection()
+        datasets=self._selection_datasets()
+        if datasets:
+            viewport._focus_points=np.vstack([mesh.points for _,mesh in datasets])
+            for i,(_,mesh) in enumerate(datasets):
+                viewport._replace(f"box-selection-{i}",mesh,color="#ffd26a",style="wireframe",
+                                  line_width=3,point_size=10,lighting=False,pickable=False)
+            viewport.plotter.render()
+        self.statusBar().showMessage(f"Selected {len(datasets)} object(s). Delete or Backspace removes the selection.")
 
     def _layers_selection(self):
         if self._syncing_layers:
@@ -460,30 +575,33 @@ class MainWindow(QMainWindow):
         self.viewport.set_origin_selection(self._selected_origins)
         if items:
             self._select_viewport_object({**items[-1], "from_layers": True})
+        else:
+            self._select_viewport_object(None)
 
     def _edit_origin_properties(self):
         if self._selected_object is None or "origin_index" not in self._selected_object:
             return
         indices = self._selected_origins or {self._selected_object["origin_index"]}
         for index in indices:
-            self.viewport._origin_settings[index] = {
-                "radius": self.origin_radius.value(),
-                "response_weight": self.origin_response.value(),
-            }
-        self._refresh_overlay(self.geometry_panel.parameters())
+            self.viewport._origin_settings.setdefault(index, {}).update(
+                radius=self.origin_radius.value(), response_weight=self.origin_response.value())
+        self._refresh_overlay(self.design_state.parameters())
 
     def _change_cloud_strength(self, value):
         self.viewport._cloud_strength = self.cloud_strength.value()
         self.viewport._cloud_radius_scale = self.cloud_radius_scale.value()
         self.viewport._cloud_opacity = self.cloud_opacity.value()
         if self.viewport._cloud_members:
-            self._refresh_overlay(self.geometry_panel.parameters())
+            self._refresh_overlay(self.design_state.parameters())
 
     def _scatter_cloud_points(self):
+        if self._worker is not None and self._worker.isRunning():
+            self.statusBar().showMessage("Wait for the current task before generating points.")
+            return
         try:
             count, capped = self.viewport.generate_cloud_points(
                 self.cloud_quiet_density.value(), self.cloud_loud_density.value(),
-                self.cloud_energy_threshold.value())
+                self.cloud_energy_threshold.value(), self.cloud_merge_distance.value())
         except ValueError as error:
             QMessageBox.information(self, "Surface points", str(error))
             return
@@ -495,17 +613,23 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _create_cloud(self):
-        if not self._selected_origins:
-            self.statusBar().showMessage("Select pavilion origin points or their spheres in Layers first.")
+        if self._worker is not None and self._worker.isRunning():
+            self.statusBar().showMessage("Wait for the current task before generating the metaball.")
             return
-        self.viewport._cloud_members = tuple(sorted(self._selected_origins))
+        members = tuple(i for i in range(self.cloud_origins.rowCount())
+                        if self.cloud_origins.cellWidget(i, 1).isChecked())
+        if not members:
+            self.statusBar().showMessage("Include at least one origin in the metaball table.")
+            return
+        self.viewport._deleted_spheres.difference_update(members)
+        self.viewport._cloud_members = members
         self.viewport._cloud_strength = self.cloud_strength.value()
         self.metaball_box.setEnabled(True)
         self.metaball_box.setChecked(True)
         self.viewport.set_metaball_enabled(True)
         self._rebuild_layers()
-        self._refresh_overlay(self.geometry_panel.parameters())
-        self.statusBar().showMessage(f"Metaball created from {len(self._selected_origins)} selected origin(s).")
+        self._refresh_overlay(self.design_state.parameters())
+        self.statusBar().showMessage(f"Metaball generated from {len(members)} origin(s).")
 
     def _update_surface_properties(self):
         data = self.viewport.surface_analysis(self.proposal_panel.threshold.value())
@@ -520,7 +644,11 @@ class MainWindow(QMainWindow):
         )
 
     def _select_viewport_object(self, item):
+        for name in list(self.viewport.plotter.actors):
+            if name.startswith("box-selection-"):
+                self.viewport._drop(name)
         self._selected_object = item
+        self.viewport._has_selection = item is not None
         self.origin_form_host.hide()
         if item is not None and "origin_index" in item:
             index = item["origin_index"]
@@ -541,10 +669,14 @@ class MainWindow(QMainWindow):
             settings = self.viewport._origin_settings.get(index, {})
             self.origin_radius.blockSignals(True)
             self.origin_response.blockSignals(True)
-            self.origin_radius.setValue(settings.get("radius", self.geometry_panel.parameters().pavilion_diameter / 2))
+            self.origin_radius.setValue(settings.get("radius", 3.0))
             self.origin_response.setValue(settings.get("response_weight", 1))
             self.origin_radius.blockSignals(False)
             self.origin_response.blockSignals(False)
+            for box, value in zip(self.origin_xyz, self.site_model.origins[index][1]):
+                box.blockSignals(True)
+                box.setValue(float(value))
+                box.blockSignals(False)
             self.origin_form_host.show()
             self.viewport.set_origin_selection(self._selected_origins)
             self.cloud_selection.setText(f"{len(self._selected_origins)} pavilion origin(s) selected.")
@@ -594,7 +726,11 @@ class MainWindow(QMainWindow):
                          f'\nBounds min (m): {", ".join(f"{v:.3f}" for v in low)}'
                          f'\nBounds max (m): {", ".join(f"{v:.3f}" for v in high)}')
                 from soundform.geometry.mesh_utils import as_mesh
-                self.viewport.set_pavilion_selection(as_mesh(vertices, item["faces"]))
+                if len(item["faces"]):
+                    self.viewport.set_pavilion_selection(as_mesh(vertices, item["faces"]))
+                else:
+                    self.viewport.set_pavilion_selection(None)
+                    self.viewport._focus_points = vertices
             else:
                 text += "\nPosition XYZ (m): " + ", ".join(f"{v:.3f}" for v in item["point"])
                 if "origin_index" in item:
@@ -605,6 +741,10 @@ class MainWindow(QMainWindow):
                     [-0.3, -0.3, -0.3], [0.3, 0.3, 0.3]
                 ])
             self.properties_text.setText(text)
+            if item["category"] == "Analysis sphere":
+                datasets = self._selection_datasets()
+                if datasets:
+                    self.viewport._focus_points = np.asarray(datasets[0][1].points)
 
     def _clear_site(self) -> None:
         self._set_site(None)
@@ -715,32 +855,6 @@ class MainWindow(QMainWindow):
         self._pending_signature = signature
         self._start("analyze", job)
 
-    def _generate(self) -> None:
-        if self.field is None:
-            QMessageBox.information(
-                self,
-                "Analyze first",
-                "Analyze the recording before generating architecture. Soundform does not use placed sound sources.",
-            )
-            return
-        if self._signature != self._signature_for(self.audio_panel.current_convention(), self.audio_panel.settings()):
-            QMessageBox.information(
-                self,
-                "Analyze again",
-                "The interval, frequency limits, or channel convention changed. Analyze Audio again so the form matches those settings.",
-            )
-            return
-        params = self.geometry_panel.parameters()
-        field = self.field
-
-        def job():
-            mesh, response, used, warnings = generate_architecture(field, params)
-            bands = {name: field.aggregate(name) for name in ("broadband", "low", "mid", "high")}
-            report = estimate_protection(mesh, response, used, bands)
-            return mesh, response, used, warnings, report
-
-        self._start("generate", job)
-
     def _generate_proposal(self) -> None:
         self._start_proposal()
 
@@ -757,7 +871,7 @@ class MainWindow(QMainWindow):
         self._proposal_timer.stop()
         panel = self.proposal_panel
         editing = definition is not None
-        params = self.geometry_panel.parameters()
+        params = self.design_state.parameters()
         field = self.field
         threshold = panel.applied_threshold if editing else panel.threshold.value()
         prompt = panel.prompt.toPlainText().strip()
@@ -850,25 +964,38 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self.statusBar().showMessage("Wait for the current task to finish.")
             return
+        if self.viewport._drawing_mode:
+            self.viewport.cancel_drawing()
+        self._busy = True
         self._job = kind
         self._worker = _Worker(fn)
         self._worker.succeeded.connect(self._job_ok)
         self._worker.failed.connect(self._job_fail)
         self._progress.setVisible(True)
         self.audio_panel.set_busy(True)
-        self.geometry_panel.set_busy(True)
         self.proposal_panel.setEnabled(False)
         self.pavilion_editor.setEnabled(False)
         self._import_site_action.setEnabled(False)
         self._clear_site_action.setEnabled(False)
         messages = {"analyze": "Analyzing the sound field.", "site": "Importing the Rhino site.",
-                    "cloud-reconstruction": "Reconstructing the cloud surface."}
+                    "cloud-reconstruction": "Reconstructing the cloud surface.",
+                    "mesh-thickness": "Building struts, nodes, or solid tiles."}
         self.statusBar().showMessage(messages.get(kind, "Generating architecture."))
         self._worker.start()
+        self._update_thickness_controls()
 
     def _job_ok(self, result) -> None:
         self._end_busy()
         if self._closing:
+            return
+        if self._job == "mesh-thickness":
+            parent,target,mesh,parent_id,points_id = result
+            if id(self.viewport._reconstructions.get(parent))!=parent_id or id(self.viewport._cloud_points)!=points_id:
+                self.statusBar().showMessage("Source geometry changed. Apply thickness again to the current mesh.")
+                return
+            self.viewport.show_reconstruction(target,mesh,color_by_cell=parent=="voronoi" and self.voronoi_colors.isChecked())
+            self._rebuild_layers()
+            self.statusBar().showMessage(f"{reconstruction_label(target)} generated: {mesh.n_cells:,} triangles.")
             return
         if self._job == "cloud-reconstruction":
             method, mesh, source_id = result
@@ -884,9 +1011,9 @@ class MainWindow(QMainWindow):
             return
         if self._job == "site":
             self._set_site(result)
-            params = self.geometry_panel.parameters()
+            params = self.design_state.parameters()
             params.protected_center_x = params.protected_center_y = 0.0
-            self.geometry_panel.set_parameters(params)
+            self.design_state.set_parameters(params)
             self.mesh = self.report = None
             self.proposal_panel.show_proposal(None)
             self._show_editable_mesh(None)
@@ -916,25 +1043,6 @@ class MainWindow(QMainWindow):
             self.analysis_panel.show_messages(result.warnings)
             self.statusBar().showMessage("Analysis complete. Adjust the design, then generate architecture.")
             return
-        mesh, _response, used, warnings, report = result
-        self.proposal_panel.show_proposal(None)
-        self.mesh = mesh
-        self.report = report
-        self.geometry_panel.set_parameters(used)
-        self._show_editable_mesh(mesh)
-        self._refresh_guides()
-        notes = []
-        if self.field is not None:
-            notes.extend(self.field.warnings)
-        notes.extend(warnings)
-        notes.extend(report.warnings)
-        self.analysis_panel.show_report(report, self.field)
-        self.analysis_panel.show_messages(notes)
-        self.statusBar().showMessage(
-            f"Generated {used.mode}. {len(mesh.vertices)} vertices, {len(mesh.faces)} faces. "
-            "The protection comparison is a heuristic."
-        )
-
     def _job_fail(self, message: str) -> None:
         self._end_busy()
         if self._closing:
@@ -943,16 +1051,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _end_busy(self) -> None:
+        self._busy = False
+        self._update_thickness_controls()
         self._progress.setVisible(False)
         self.audio_panel.set_busy(False)
-        self.geometry_panel.set_busy(False)
         self.proposal_panel.setEnabled(True)
         self.pavilion_editor.setEnabled(True)
         self._import_site_action.setEnabled(True)
         self._clear_site_action.setEnabled(self.site_model is not None)
 
     def _refresh_guides(self) -> None:
-        params = self.geometry_panel.parameters()
+        params = self.design_state.parameters()
         self.viewport.set_guides(params)
         self._refresh_overlay(params)
         if self.mesh is not None:
@@ -966,7 +1075,7 @@ class MainWindow(QMainWindow):
         self.analysis_panel.show_field(self.field, settings.view_band, settings.view_smoothing, time_s)
         if self.report is not None:
             self.analysis_panel.show_report(self.report, self.field)
-        self._refresh_overlay(self.geometry_panel.parameters())
+        self._refresh_overlay(self.design_state.parameters())
 
     def _refresh_overlay(self, params) -> None:
         if self.field is None:
@@ -1000,7 +1109,7 @@ class MainWindow(QMainWindow):
                 None if self.audio is None else self.audio.path,
                 self.audio_panel.current_convention(),
                 self.audio_panel.settings(),
-                self.geometry_panel.parameters(),
+                self.design_state.parameters(),
                 self.field,
                 self.mesh,
                 site_path=str(self.site_model.path) if self.site_model else None,
@@ -1023,7 +1132,7 @@ class MainWindow(QMainWindow):
             return
         self.player.stop()
         self.proposal_panel.show_proposal(None)
-        self.geometry_panel.set_parameters(record.design)
+        self.design_state.set_parameters(record.design)
         self.audio_panel.apply_settings(record.analysis_settings)
         self.field = record.sound_field
         self.mesh = record.mesh
@@ -1136,7 +1245,7 @@ class MainWindow(QMainWindow):
         self._signature = None
         self.audio_panel.clear()
         self.proposal_panel.show_proposal(None)
-        self.geometry_panel.set_parameters(default_parameters())
+        self.design_state.set_parameters(default_parameters())
         self._show_editable_mesh(None)
         self.analysis_panel.clear()
         self._set_site(None)
@@ -1150,5 +1259,6 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         self.player.stop()
+        self.hex_layout.close_panels()
         self.viewport.shutdown()
         super().closeEvent(event)

@@ -14,6 +14,11 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QPus
 from soundform.geometry.analysis_envelope import merged_envelope, envelope_energy, analyze_envelope, clip_to_terrain, scatter_surface_points
 from soundform.geometry.design_space import EAR_HEIGHT_M, characteristic_radius, sound_az_el_to_design_vector
 from soundform.models.project import DesignParameters
+from soundform.ui.viewport_drawing import ViewportDrawingMixin
+
+
+def reconstruction_label(method):
+    return {"delaunay-frame":"Delaunay struts and spheres", "voronoi-solid":"Voronoi solid tiles"}.get(method,method.title()+" mesh")
 
 
 def _polydata(mesh) -> pv.PolyData:
@@ -47,9 +52,16 @@ def _sphere_samples(azimuth_deg, elevation_deg, scores, params) -> pv.PolyData |
     return points
 
 
-class Viewport(QWidget):
+class Viewport(ViewportDrawingMixin,QWidget):
+    box_selected = Signal(object,bool)
+    delete_requested = Signal()
     object_selected = Signal(object)
+    geometry_created = Signal(str,object)
+    drawing_mode_changed = Signal(str)
+    drawing_hint = Signal(str)
     envelope_updated = Signal()
+    view_changed = Signal(str)
+    reconstructions_changed = Signal()
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._params = DesignParameters()
@@ -58,7 +70,10 @@ class Viewport(QWidget):
         self._terrain = None
         self._site_model = None
         self._pick_objects = {}
+        self._drawing_mode = None
+        self._drawing_points = []
         self._focus_points = None
+        self._has_selection = False
         self._navigation_scale = 1.0
         self._envelope_key = None
         self._envelope = None
@@ -71,6 +86,7 @@ class Viewport(QWidget):
         self._reconstructions = {}
         self._layer_visibility = {}
         self._object_visibility = {}
+        self._deleted_spheres = set()
         self._pavilion_source = None
         self._selection_source = None
         self._cloud_strength = 1.0
@@ -79,6 +95,7 @@ class Viewport(QWidget):
         self._selected_origin_indices = set()
         self._origin_settings = {}
         self._overlay_input = None
+        self._box_start = None
         self._drag = None
         self._view_name = "perspective"
         self._show_geometry = True
@@ -111,7 +128,7 @@ class Viewport(QWidget):
         view_layout.addLayout(controls)
         self.caption = QLabel(
             f"Grid 1 m · Major lines 5 m · Microphone {EAR_HEIGHT_M:g} m above ground\n"
-            "Middle-click frame object • Right-drag orbit · Shift + right-drag pan · Wheel zoom\n"
+            "Middle-click frame selection • Right-drag orbit · Shift + right-drag pan · Wheel zoom\n"
             "Downward arrivals are shown at the horizon."
         )
         self.caption.setObjectName("hint")
@@ -153,7 +170,7 @@ class Viewport(QWidget):
         self._metaball_enabled = False
         self._cloud_points = None
         self._drop("cloud-points")
-        colors = {"Terrain": "#687a62", "Solids": "#9ca7ad", "Vegetation": "#527345"}
+        colors = {"Terrain": "#687a62", "Solids": "#9ca7ad", "Vegetation": "#527345", "Circulation": "#f2bc65"}
         for name in list(self._pick_objects):
             self._drop(name)
         self._pick_objects.clear()
@@ -163,9 +180,15 @@ class Viewport(QWidget):
             for index, item in enumerate(model.objects):
                 name = f"context-object-{index}"
                 cells = np.column_stack((np.full(len(item["faces"]), 3), item["faces"])).ravel()
-                self._replace(name, pv.PolyData(item["vertices"], cells),
+                geometry = pv.PolyData(item["vertices"], cells)
+                options = {}
+                if "lines" in item:
+                    geometry.verts = np.empty(0, dtype=np.int64)
+                    geometry.lines = item["lines"]
+                    options.update(line_width=3, lighting=False)
+                self._replace(name, geometry, **options,
                               color=colors[item["category"]], reset_camera=False)
-                self._pick_objects[name] = item
+                self._pick_objects[name] = {**item,"_site_index":index,"_actor":name}
             if not model.objects:
                 for category, (vertices, faces) in model.meshes.items():
                     cells = np.column_stack((np.full(len(faces), 3), faces)).ravel()
@@ -183,7 +206,7 @@ class Viewport(QWidget):
                 name = f"source-{index}"
                 self._replace(name, pv.Sphere(center=point, radius=0.18),
                               color="#e59355", reset_camera=False)
-                self._pick_objects[name] = {"name": label, "category": "Sound Sources", "point": point}
+                self._pick_objects[name] = {"name": label, "category": "Sound Sources", "point": point, "_source_index":index,"_actor":name}
         self._terrain = None
         if model is not None and "Terrain" in model.meshes:
             vertices, faces = model.meshes["Terrain"]
@@ -230,15 +253,42 @@ class Viewport(QWidget):
 
     def eventFilter(self, watched, event):
         if watched is self.plotter.interactor:
+            if self._drawing_event(event):
+                return True
+            if event.type()==QEvent.KeyPress and event.key() in (Qt.Key_Delete,Qt.Key_Backspace):
+                self.delete_requested.emit()
+                return True
+            if event.type()==QEvent.MouseMove and self._box_start is not None:
+                from PySide6.QtCore import QRect
+                self._selection_band.setGeometry(QRect(self._box_start,event.position().toPoint()).normalized())
+                if (event.position().toPoint()-self._box_start).manhattanLength()>5:
+                    self._selection_band.show()
+                return True
             if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick, QEvent.MouseButtonRelease):
                 # Keep VTK's default trackball gestures from competing with right-drag navigation.
                 if event.button() == Qt.LeftButton:
                     if event.type() == QEvent.MouseButtonPress:
-                        self._pick_object(event.position())
+                        from PySide6.QtWidgets import QRubberBand
+                        from PySide6.QtCore import QRect
+                        self.plotter.interactor.setFocus(Qt.MouseFocusReason)
+                        self._box_start=event.position().toPoint()
+                        if not hasattr(self,"_selection_band"):
+                            self._selection_band=QRubberBand(QRubberBand.Rectangle,self.plotter.interactor)
+                        self._selection_band.setGeometry(QRect(self._box_start,self._box_start))
+                    elif event.type()==QEvent.MouseButtonRelease and self._box_start is not None:
+                        from PySide6.QtCore import QRect
+                        end=event.position().toPoint()
+                        start=self._box_start
+                        self._box_start=None
+                        self._selection_band.hide()
+                        if (end-start).manhattanLength()>5:
+                            self.box_selected.emit(QRect(start,end).normalized(),bool(event.modifiers() & Qt.ControlModifier))
+                        else:
+                            self._pick_object(event.position())
                     return True
                 if event.button() == Qt.MiddleButton:
                     if event.type() == QEvent.MouseButtonPress:
-                        self.focus_object(event.position())
+                        self.focus_object()
                     return True
             if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick) and event.button() == Qt.RightButton:
                 modifiers = event.modifiers()
@@ -295,7 +345,10 @@ class Viewport(QWidget):
                                                "extend_selection": bool(QApplication.keyboardModifiers() & Qt.ControlModifier)})
                 elif name.startswith("reconstruction-"):
                     mesh = self._reconstructions[name.removeprefix("reconstruction-")]
-                    self.object_selected.emit({"category": "Reconstruction", "name": name.removeprefix("reconstruction-").title() + " mesh",
+                    method = name.removeprefix("reconstruction-")
+                    label = reconstruction_label(method)
+                    self.object_selected.emit({"category": "Reconstruction", "name": label, "layer": label,
+                                               "_method": method, "_actor": name,
                                                "vertices": mesh.points, "faces": mesh.faces.reshape(-1, 4)[:, 1:]})
                 elif name == "sound-field":
                     self.object_selected.emit({"category": "Analysis envelope", "name": "Analysis envelope"})
@@ -308,8 +361,8 @@ class Viewport(QWidget):
             self.object_selected.emit(None)
 
     def focus_object(self, position=None):
-        if position is not None:
-            self._pick_object(position, clear=False)
+        if not self._has_selection:
+            return
         points = self._focus_points
         if points is None or not len(points):
             return
@@ -416,6 +469,15 @@ class Viewport(QWidget):
         for name in list(self.plotter.actors):
             if name.startswith(("analysis-sphere-", "analysis-fill-")):
                 self._drop(name)
+        if self._site_model is not None and not self._site_model.origins:
+            self._envelope_key = None
+            self._envelope = pv.PolyData()
+            self._cloud_surface = self._cloud_sampled = self._cloud_points = None
+            self._drop("cloud-points")
+            self.clear_reconstructions()
+            self.plotter.render()
+            self.envelope_updated.emit()
+            return
         has_audio = azimuth_deg is not None and elevation_deg is not None and scores is not None
         centers = []
         if self._site_model is not None:
@@ -423,13 +485,13 @@ class Viewport(QWidget):
         if not centers:
             centers = [(params.protected_center_x, params.protected_center_y, EAR_HEIGHT_M)]
         centers = np.asarray(centers, dtype=float)
-        radii = [self._origin_settings.get(i, {}).get("radius", max(0.5, params.pavilion_diameter / 2))
+        radii = [self._origin_settings.get(i, {}).get("radius", 3.0)
                  for i in range(len(centers))]
-        members = tuple(i for i in (self._cloud_members or ()) if i < len(centers))
+        members = tuple(i for i in (self._cloud_members or ()) if i < len(centers) and i not in self._deleted_spheres)
         for index in members:
-            radii[index] *= self._cloud_radius_scale
+            radii[index] *= self._cloud_radius_scale * self._origin_settings.get(index, {}).get("radius_scale", 1)
         key = (tuple(centers.ravel()), tuple(radii), members,
-               self._metaball_enabled, self._cloud_strength)
+               self._metaball_enabled, self._cloud_strength, tuple(sorted(self._deleted_spheres)))
         if key != self._envelope_key:
             self._envelope_key = key
             self._cloud_surface = None
@@ -444,13 +506,13 @@ class Viewport(QWidget):
                                     strength=self._cloud_strength, full_sphere=True), self._terrain)
                 pieces.append(self._cloud_surface)
             for i, center in enumerate(centers):
-                if self._metaball_enabled and i in members:
+                if i in self._deleted_spheres or (self._metaball_enabled and i in members):
                     continue
                 sphere = clip_to_terrain(merged_envelope([center], radii[i], merge=False, full_sphere=True), self._terrain)
                 pieces.append(sphere)
-            self._envelope = pieces[0].merge(pieces[1:], merge_points=False) if len(pieces) > 1 else pieces[0]
+            self._envelope = pieces[0].merge(pieces[1:], merge_points=False) if len(pieces) > 1 else (pieces[0] if pieces else pv.PolyData())
         for i, center in enumerate(centers):
-            if self._metaball_enabled and i in members:
+            if i in self._deleted_spheres or (self._metaball_enabled and i in members):
                 continue
             sphere = clip_to_terrain(merged_envelope([center], radii[i], merge=False, full_sphere=True), self._terrain)
             sphere.point_data["energy"] = (
@@ -507,11 +569,13 @@ class Viewport(QWidget):
                           render_points_as_spheres=True, point_size=5, scalars="energy",
                           cmap="magma", clim=(0, 1), show_scalar_bar=False)
 
-    def generate_cloud_points(self, quiet_density, loud_density, energy_threshold=0.0):
+    def generate_cloud_points(self, quiet_density, loud_density, energy_threshold=0.0, merge_distance=0.0):
         if self._cloud_sampled is None:
             raise ValueError("Create a metaball and analyze audio before generating surface points.")
         self._cloud_points, capped = scatter_surface_points(
             self._cloud_sampled, quiet_density, loud_density, energy_threshold=energy_threshold)
+        from soundform.geometry.point_filters import merge_close_points
+        self._cloud_points = merge_close_points(self._cloud_points, merge_distance)
         self.clear_reconstructions()
         self._draw_cloud_points()
         self._apply_visibility()
@@ -522,18 +586,38 @@ class Viewport(QWidget):
         for method in self._reconstructions:
             self._drop(f"reconstruction-{method}")
         self._reconstructions.clear()
+        self.reconstructions_changed.emit()
+
+    def remove_reconstruction(self,method):
+        for key in list(self._reconstructions):
+            if key==method or key.startswith(method+"-"):
+                self._drop("reconstruction-"+key)
+                self._reconstructions.pop(key,None)
+        self.reconstructions_changed.emit()
 
     def show_reconstruction(self, method, mesh, color_by_cell=False):
+        if method in ("delaunay","voronoi"):
+            self.remove_reconstruction(method)
         self._reconstructions[method] = mesh
-        options = (dict(scalars="voronoi_cell", preference="cell", cmap="tab20")
-                   if color_by_cell and "voronoi_cell" in mesh.cell_data
-                   else dict(scalars="energy", cmap="magma", clim=(0, 1)))
+        if method.startswith("voronoi"):
+            options = (dict(scalars="center_energy", preference="cell", cmap="magma", clim=(0, 1))
+                       if color_by_cell and "center_energy" in mesh.cell_data
+                       else dict(color="#d9c7a6"))
+        else:
+            options = dict(scalars="energy", cmap="magma", clim=(0, 1))
+        if method == "delaunay":
+            options = dict(style="wireframe", color="#55c8db", line_width=2, lighting=False)
+        if method == "connections":
+            options.update(line_width=2, lighting=False)
         self._replace(f"reconstruction-{method}", mesh, **options,
-                      opacity=0.95 if method == "voronoi" else 0.85, show_scalar_bar=False)
+                      opacity=1.0 if method in ("delaunay-frame","voronoi-solid") else 0.95 if method == "voronoi" else 0.85, show_scalar_bar=False)
         self._apply_visibility()
         self.plotter.render()
+        self.reconstructions_changed.emit()
 
     def object_visibility_key(self, item):
+        if "_actor" in item:
+            return item["_actor"]
         category = item.get("category")
         if category == "Pavilion":
             return "part:" + item["name"]
@@ -544,7 +628,7 @@ class Viewport(QWidget):
         if category == "Surface points":
             return "cloud-points"
         if category == "Reconstruction":
-            return "reconstruction-" + item["name"].removesuffix(" mesh").lower()
+            return "reconstruction-" + item.get("_method",item["name"].removesuffix(" mesh").lower())
         for actor_name, obj in self._pick_objects.items():
             if obj is item:
                 return actor_name
@@ -599,7 +683,8 @@ class Viewport(QWidget):
         if name.startswith(("analysis-sphere-", "analysis-fill-")):
             return "Analysis spheres"
         if name.startswith("reconstruction-"):
-            return name.removeprefix("reconstruction-").title() + " mesh"
+            method = name.removeprefix("reconstruction-")
+            return reconstruction_label(method)
         if name in ("cloud-points", "sound-field", "sound-sphere"):
             return "Cloud" if self._metaball_enabled else "Analysis spheres"
         if name == "architecture":
@@ -634,6 +719,7 @@ class Viewport(QWidget):
         return result
 
     def set_view(self, name: str) -> None:
+        name = "right" if name == "side" else name
         radius = max(8.0, characteristic_radius(self._params))
         distance = max(radius * 3.1, _ring_radius(self._params) * 3.0)
         self._view_name = name
@@ -645,7 +731,7 @@ class Viewport(QWidget):
         elif name == "front":
             position = (x, y + distance, EAR_HEIGHT_M)
             up = (0.0, 0.0, 1.0)
-        elif name == "side":
+        elif name in ("side", "right"):
             position = (x + distance, y, EAR_HEIGHT_M)
             up = (0.0, 0.0, 1.0)
         else:
@@ -659,6 +745,7 @@ class Viewport(QWidget):
             self.plotter.camera.parallel_scale = 1.15 * _ring_radius(self._params)
         self.plotter.reset_camera_clipping_range()
         self.plotter.render()
+        self.view_changed.emit(name)
 
     def reset_view(self) -> None:
         self.geometry_box.setChecked(True)

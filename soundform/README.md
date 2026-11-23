@@ -154,3 +154,79 @@ Voronoi controls:
 Press Generate after changing settings. Voronoi results appear in their own layer and run in the background like other reconstructions.
 
 Layer groups start collapsed. Both layers and individual objects have visibility checkboxes. Parent-layer visibility and individual-object visibility are independent, so hiding and showing a layer preserves which of its objects were hidden. Pavilion-part visibility affects display only and retains the underlying design for editing and analysis.
+
+
+## Layer context menu
+
+Right-click an object or layer in **Layers** for **Copy**, **Delete**, and **Paste into this layer**. Object commands act on that row; layer commands act on all objects directly inside the layer. Empty layers remain available as paste targets. Paste uses the clicked object's parent layer or the clicked layer itself, gives copies unique names, and keeps their original coordinates.
+
+Imported site objects and pavilion origins remain functional when pasted into their corresponding layers. Pasted pavilion components in the Pavilion layer remain editable parts. Copied analysis spheres, clouds, surface point sets, and reconstructed meshes are independent geometry snapshots, so changing the live analysis will not regenerate those copies. Deleting live origins or terrain invalidates dependent cloud analysis. These scene changes are in memory; the original Rhino file is not edited.
+
+
+## Connect cloud points
+
+Expand **Connect points** in Cloud, then press **Generate connection lines**. Settings are **Maximum distance** in metres (default 1 m), **Minimum distance** (default 0 m), **Connections per point** (default 8), and **Total line limit** (default 100,000). Each line joins two existing cloud points within the inclusive distance range. Zero-length and duplicate edges are excluded. Nearby candidates are preferred; the connections-per-point value is an upper bound at both endpoints, not a target degree. Candidate searches are bounded to keep dense point clouds manageable, so this is a sparse network rather than every qualifying pair.
+
+Connection checks are enabled by default:
+- **Follow metaball surface** connects neighboring surface regions with mesh-based paths. A multi-source surface graph search establishes neighbors and routes, with direct links within a single triangle. Disconnected surface pieces never connect. Maximum/minimum distance refers to total path length, rather than the chord through the cloud. Routing is a discrete mesh approximation, not an exact continuous geodesic solver.
+- **Limit by local point spacing** caps length by **Spacing multiplier** (default 2.5) times median nearby point spacing, using the denser endpoint. The absolute distance limit still applies.
+- **Reject crossings and overlaps** rejects paths approaching an accepted path within **Crossing tolerance** (default 0.005 m), while permitting shared cloud endpoints. This tests 3D proximity, including collinear overlap, rather than crossings visible only in camera projection.
+
+Disable checks to compare simpler networks. Mesh routes can have bends, and stricter checks can leave some points disconnected. The status bar reports generated paths and rejections by spacing/crossing checks. Connections retain energy colors and appear in their own **Connection lines** layer, with visibility and Copy/Delete support. Generating new cloud points clears the live connection network, alongside other reconstructions.
+
+### Delaunay network
+The Delaunay panel now builds an approximate intrinsic triangulation using the metaball's existing surface topology. Its only adjustable mesh parameter is the maximum surface-edge distance (default 2.5 m; zero means unlimited); the existing point positions supply the samples. Sound intensity controls point generation density only and is neither read by this triangulation nor used to color its network.
+
+A bounded refinement of the reference mesh resolves geodesic Voronoi regions; their junctions define triangles between the existing points. Connections never cross between disconnected reference components. The distance cap removes whole triangles using conservative graph-route surface distance estimates, rather than distance through the cloud. Original point coordinates are retained, and the network is displayed in a single color.
+
+This is an experimental surface approximation, not an exact global unwrap or a guaranteed intersection-free remesher. Straight triangle edges approximate curved surface routes; very sparse samples, tight folds, or limited reference resolution can leave holes or poor triangles. Refinement is bounded at 300,000 reference faces, so very dense samples may not all appear in the output. No automatic hole filling bridges distance-cap gaps. The former planar helper remains available for standalone calls without a reference surface; the app always requires the metaball surface.
+
+### Circulation curves and floating panels
+Rhino objects on Circulation (including sublayers) may be meshes or curves. Polylines retain their vertices; other curves are sampled adaptively with a 1 mm target chord tolerance and bounded refinement for viewport display. Curves retain their source names, local metre coordinates, layer visibility, and copy/paste behavior. They are imported as line geometry, not filled surfaces. Floating note panels hide individually when dismissed, and all close when the main window closes successfully.
+
+### Cloud workflow
+Cloud contains Metaball, Points, and Circulation sections. The origin table controls inclusion and per-origin radius scale; Generate metaball applies the selected membership and scales. Delaunay, Poisson and Voronoi tools live in Generate. Audio and Analysis share the upper-left sloping edge; Layers and Properties occupy the left vertical edge. Export occupies the lower-right sloping edge. Four direct view buttons run along the lower-left edge.
+
+Points provides density, energy threshold, and merging distance (metres, default 0/off). Merging keeps the first existing surface sample per distance neighbourhood, with its metadata, so points stay on the surface and connected chains do not collapse. Circulation lists imported curve objects with individual pipe radii (default 2 m, 0 skips a curve). Subtract points removes samples within the 3D distance of the curve's sampled segments, including rounded end caps. Regenerate points to undo subtraction. Meshes are invalidated after point changes and must be regenerated.
+
+Selecting an origin exposes editable X/Y/Z in Properties, in local site metres relative to the original imported reference origin. An edit moves that origin's analysis sphere/metaball contribution, updates the viewport, and clears dependent points and meshes. Editing these coordinates changes the running Soundform scene; it does not modify the source Rhino file.
+
+### Voronoi maximum reach and sound colours
+Generate > Voronoi provides Maximum cell reach (default 1.25 m; 0 means unlimited). It clips each cell to a straight-line 3D radius about its existing generating sample, leaving uncovered regions where no cell reaches. It is independent of panel gap. Reach crossings on the whole tile boundary are joined with straight cutting edges in a local surface plane; the clipped fragments retain the metaball surface. If the reach sits wholly inside a tile and has no boundary crossings, a square footprint is used. Tight curvature can introduce additional facets to stay within the 3D cap. This is Euclidean reach, not geodesic surface distance.
+
+Color by center sound intensity is on by default. Every triangle belonging to a tile uses that tile's generating sample's relative energy (0-1), including when samples are subsampled by the cell limit. It uses a common magma scale, not random cell colours or interpolated vertex energy. Disabling the checkbox gives a uniform neutral material. Audio intensity does not change reach or cell geometry. Regenerate Voronoi after changing settings.
+
+Preserve circulation openings is enabled by default in Generate > Voronoi. It subtracts the Circulation table pipe radii from the final tiles, independently of point subtraction, so neighbouring cells cannot refill entrances. Zero-radius curves are ignored. Pipes are approximated by conservative polygonal capsules with rounded ends and bends; clearance may be slightly wider than the exact round pipe. Cuts split crossing triangle interiors, preserve center energy and cell labels, and leave open boundary rims without filling circulation holes.
+
+### Selection navigation and export
+Middle-click frames the existing selection only; it never picks under the pointer and does nothing with no selection. File > Export selected exports selected scene geometry (including multiple selected objects in Layers). Rhino .3dm is the default and supports meshes, polylines and points in local site metres; tile center-energy colours are retained as mesh vertex colours. OBJ supports geometry and lines/points; STL accepts surfaces only. Analysis spheres now default to 3 m radius independently of pavilion dimensions; explicit per-origin radius overrides and radius scales remain effective.
+
+Circulation cutting is batched against the original Voronoi triangles using a spatial index and vectorized separating-plane checks. Distant triangles are copied in bulk, straight redundant polyline samples are removed without simplifying bends, and surviving convex pieces are triangulated only after their nearby cuts. The final mesh is assembled and cleaned once, preserving tile labels and center-energy values. Representative 24-segment tests reduced the cutting stage from 2.21 s to 0.056 s for a straight path and 6.68 s to 0.269 s for a curved path, with matching remaining surface areas. Actual generation time depends on surface resolution and curve complexity.
+
+### Hexagon frame and Export panel
+A thin sage/charcoal hexagonal band surrounds the viewport, with Chrome-style tab shoulders joining its inner edge. Tab anchors remain fractional positions along each edge. Audio/Analysis are on the former Manual edge, Layers/Properties on the left vertical edge, and Export on the former Layers/Properties edge. The Manual UI and its manual-generation action were removed; shared design parameters remain in a nonvisual DesignState for viewport, project and AI use. Connect points and its controls were removed from Generate.
+
+Export lists the scene's layers and objects with checkboxes. Checking a parent includes its objects; individual children can also be checked. All, None and Use selection shortcuts are available. The list refreshes as scene objects change. Choose Rhino .3dm, OBJ, or STL and press Export checked objects. STL requires surfaces; Rhino and OBJ support curves and point sets. File > Export selected remains available.
+
+### Struts, nodes and solid tiles
+Generate > Delaunay enables its thickness controls after the base mesh exists. Uniform sizing uses a strut/node radius (default 0.05 m). Sound-weighted sizing interpolates between minimum and maximum radius (defaults 0.02-0.15 m) using each original connected sample's relative energy, clipped to 0-1. Shared triangle edges generate only one strut. Weighted struts are capped tapered cylinders joining endpoint radii; node spheres use the same local radius. Primitives overlap at joints and are not Boolean-unioned. The low-poly primitives use 12-sided struts and 12-by-10 spheres to limit generation cost.
+
+Generate > Voronoi enables uniform total thickness (default 0.10 m) or sound-weighted minimum/maximum thickness (defaults 0.03-0.30 m). Weight is the generating sample's relative energy; all faces of a tile keep its center colour. By default each tile projects onto the tangent plane of the metaball face at its generating point, then extrudes symmetrically by half the total thickness on each side. Preserve surface curvature retains the tile surface and offsets its vertices along averaged tile normals instead. Boundary walls close exterior rims and circulation holes without filling holes. Cut-edge T-junctions are split before wall construction. Large folded cells that cannot project safely request curvature mode; large offsets on tight curves can still self-intersect and require smaller thickness or tiles.
+
+Outputs appear separately as Delaunay struts and spheres and Voronoi solid tiles in Layers and Export. Uniform and weighted buttons replace the same derived output. Rebuilding or deleting the source mesh clears its derived geometry; point changes clear all reconstructions. Generation runs in the background and discards results if their source changed. Each output is limited to four million triangles; dense clouds may need fewer source points.
+
+### Drawing tools and active layer
+Generate shares the upper-right edge with AI pavilion and Cloud. The right vertical edge has Point, Line and Spline tools. A horizontal Layer dropdown joins the viewport at that edge and may extend outside the outer band; it chooses the destination for newly drawn geometry. Available scene layers are listed alongside Drawing, and imported sites also expose Circulation, Pavilion Origin and Sound Sources.
+
+Left-click adds points/control points to a draft. Right-click or Enter finishes; Escape cancels the entire uncommitted draft. Point mode may place several points before finishing; Line creates a line/polyline (at least two clicks); Spline creates a clamped control-point B-spline (at least three clicks). Preview curves and control markers are temporary. Switching tools cancels the previous draft. Right-drag orbit is reserved while drawing because right-click finishes.
+
+Clicks snap to visible mesh surfaces when hit. Otherwise Top and Perspective use the XY ground plane, Front uses an XZ plane through the camera focus, and Right uses a YZ plane through that focus. Curves on Circulation join its clearance-radius table immediately; points on Pavilion Origin become metaball origins, and Sound Sources points join the source list. Other geometry becomes a selectable scene object in the chosen layer. Use Export to save newly drawn geometry; Rhino export retains true control-point splines, while OBJ uses their sampled polylines. Source Rhino files are never modified by drawing.
+
+
+Viewport selection: left-click selects an object; left-drag draws a box that selects
+whole objects fully inside it, including geometry behind other objects. Ctrl-drag
+adds to the current selection. Selected objects are highlighted in gold and listed
+as selected in Layers. Delete or Backspace removes the selection while the viewport
+has keyboard focus. Drawing tools keep their click-to-place gestures while active.
+The drawing layer selector sits above Point, Line, and Spline on the right edge and
+shows only the selected layer name.
