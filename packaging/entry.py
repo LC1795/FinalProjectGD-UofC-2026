@@ -49,6 +49,15 @@ def smoke_test(report_path):
         "WAV read/write", "Rhino read/write", "audio backend import"]}, indent=2))
     # Exit before local QApplication/VTK objects start Python finalization.
     # The success report has been closed and all checks have completed.
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        # ExitProcess also invokes DLL detach handlers. This disposable check
+        # must avoid native Qt/VTK detach work after its report is durable.
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 0)
     os._exit(0)
 
 
