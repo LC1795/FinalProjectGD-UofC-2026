@@ -1,0 +1,7 @@
+# Local build environments and generated Windows distributions
+.build/
+build/
+dist/
+__pycache__/
+.pytest_cache/
+

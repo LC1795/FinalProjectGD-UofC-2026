@@ -1,0 +1,4 @@
+-r ../soundform/requirements.txt
+Pillow>=10
+PyInstaller==6.17.0
+

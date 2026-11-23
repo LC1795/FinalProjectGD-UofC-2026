@@ -1,0 +1,21 @@
+SOUNDFORM — WINDOWS PORTABLE APP
+
+1. Extract the entire ZIP to a folder on your computer.
+2. Open that folder and double-click Soundform.exe.
+
+Keep the _internal folder beside Soundform.exe. Running inside the ZIP or copying
+only the EXE will not work. No Python installation is required.
+
+Optional desktop shortcut: right-click Soundform.exe and choose Show more options
+> Send to > Desktop (create shortcut). You can pin the running app to the taskbar.
+
+This build is for 64-bit Windows 10/11. It is not a Mac application.
+The 3D viewport needs a working graphics driver. Audio playback needs an output device.
+
+Audio analysis, site import, point generation, meshing and exports run locally.
+The experimental AI pavilion feature needs your own ANTHROPIC_API_KEY environment
+variable and internet access. No developer API key or personal settings are included.
+
+If startup fails, send the author the file:
+%LOCALAPPDATA%\Soundform\startup-error.log
+

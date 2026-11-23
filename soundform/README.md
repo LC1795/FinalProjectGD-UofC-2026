@@ -1,5 +1,9 @@
 # Soundform
 
+For a Windows app that classmates can run without Python, see
+[Windows packaging](../packaging/README.md). The portable ZIP includes the app,
+required libraries and desktop/taskbar branding.
+
 Soundform is a desktop prototype for architectural design exploration. It reads a first-order Ambisonic recording, estimates how sound energy arrives over time, and grows an abstract 3D form in response. It is not a certified acoustic simulator, and it does not ask you to place sound sources or draw a site plan.
 
 ## What you can do
