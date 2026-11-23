@@ -6,6 +6,10 @@ root = Path(SPECPATH).parent
 datas = [(str(root / "soundform" / "assets"), "soundform/assets")]
 binaries = []
 hiddenimports = ["PySide6.QtOpenGLWidgets", "matplotlib.backends.backend_qtagg"]
+# SciPy's array backend resolves these modules dynamically. Older freezer
+# hooks do not discover the vendored FFT/linalg modules in newer SciPy wheels.
+hiddenimports += collect_submodules("scipy._external")
+hiddenimports += collect_submodules("scipy._lib.array_api_compat")
 for package in ("vtkmodules", "pyvista", "pyvistaqt", "rhino3dm"):
     data, binary, hidden = collect_all(package, include_py_files=False,
                                      filter_submodules=lambda name: ".tests" not in name)

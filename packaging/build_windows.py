@@ -31,8 +31,10 @@ def main():
     report = output / "smoke-test.json"
     # A stale success report must never validate a failed launch.
     report.write_text('{}')
-    subprocess.run([str(bundle / "Soundform.exe"), "--smoke-test", str(report)],
-                   cwd=output, timeout=180, check=True)
+    launched = subprocess.run([str(bundle / "Soundform.exe"), "--smoke-test", str(report)],
+                              cwd=output, timeout=180)
+    if launched.returncode:
+        raise RuntimeError(f"Packaged launch failed (exit {launched.returncode}): {report.read_text()}")
     if json.loads(report.read_text()).get("ok") is not True:
         raise RuntimeError(f"Packaged launch check failed: {report.read_text()}")
     archive = output / "Soundform-Windows-x64.zip"
