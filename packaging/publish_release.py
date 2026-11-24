@@ -12,7 +12,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "LC1795/FinalProjectGD-UofC-2026"
-TAG = "soundform-v0.1.0"
+TAG = "soundform-v2.0.0"
 
 
 def git(*args):
@@ -20,18 +20,24 @@ def git(*args):
 
 
 def local_artifacts():
-    archive = ROOT / "dist" / "Soundform-Windows-x64.zip"
+    archive = ROOT / "dist" / "SoundForm-V2.0-Windows-x64.zip"
     checksum = archive.with_suffix(".zip.sha256")
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if checksum.read_text().split()[0] != digest:
         raise RuntimeError("The ZIP does not match its checksum. Rebuild before publishing.")
-    with zipfile.ZipFile(archive) as zipped:
-        revision = json.loads(zipped.read("Soundform/build-info.json"))["revision"]
-    subprocess.run(["git", "merge-base", "--is-ancestor", revision, "HEAD"], cwd=ROOT, check=True)
+    installer = archive.with_name("SoundForm-V2.0-Setup-x64.exe")
+    with zipfile.ZipFile(archive) as zipped, installer.open("rb") as standalone:
+        build = json.loads(zipped.read("build-info.json"))
+        revision = build["revision"]
+        with zipped.open(installer.name) as packaged:
+            if hashlib.file_digest(packaged, "sha256").digest() != hashlib.file_digest(standalone, "sha256").digest():
+                raise RuntimeError("The standalone installer differs from the ZIP. Rebuild before publishing.")
+    if build.get("dirty") is not False or revision != git("rev-parse", "HEAD"):
+        raise RuntimeError("Rebuild the installer from the current clean commit before publishing.")
     if git("branch", "--show-current") != "main" or git("status", "--porcelain"):
         raise RuntimeError("Publish from a clean main branch. Commit or save local edits first.")
-    return archive, checksum, revision
+    return archive, checksum, installer, revision
 
 
 def credentials():
@@ -83,7 +89,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
-    archive, checksum, revision = local_artifacts()
+    archive, checksum, installer, revision = local_artifacts()
     print(f"Verified ZIP: {archive.name} ({archive.stat().st_size:,} bytes), source {revision[:7]}", flush=True)
     if args.check_only:
         return
@@ -107,13 +113,13 @@ def main():
     subprocess.run(["git", "push", "origin", "main"], cwd=ROOT, check=True)
     if release is None:
         release = request(token, "POST", base + "/releases", {
-            "tag_name": TAG, "target_commitish": revision, "name": "Soundform 0.1.0 — Windows",
+            "tag_name": TAG, "target_commitish": revision, "name": "SoundForm V2.0 — Windows",
             "draft": True, "prerelease": False,
             "body": (ROOT / "packaging" / "release-notes.md").read_text(encoding="utf-8")})
     elif release.get("target_commitish") != revision:
         raise RuntimeError("The existing draft targets another revision; stopped.")
     assets = request(token, "GET", base + f"/releases/{release['id']}/assets?per_page=100")
-    for path in (archive, checksum):
+    for path in (installer, archive, checksum):
         with path.open("rb") as stream:
             digest = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
         existing = next((item for item in assets if item["name"] == path.name), None)

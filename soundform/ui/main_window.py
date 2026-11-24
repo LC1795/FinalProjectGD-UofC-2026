@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from soundform import APP_NAME
+
 import numpy as np
 
 from PySide6.QtCore import QSettings, QThread, Qt, QTimer, Signal
@@ -86,7 +88,7 @@ from soundform.ui.drawing_actions import DrawingActionsMixin
 class MainWindow(DrawingActionsMixin, ThicknessControlsMixin, ExportPanelMixin, SelectionActionsMixin, CloudControlsMixin, LayerActionsMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Soundform")
+        self.setWindowTitle(APP_NAME)
         self.resize(1440, 900)
         self.audio = None
         self.site_model = None

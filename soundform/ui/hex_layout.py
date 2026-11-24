@@ -10,6 +10,9 @@ from PySide6.QtWidgets import (
 )
 
 
+from soundform import APP_NAME
+
+
 def hex_vertices(center, radius):
     return [QPointF(center.x() + radius * math.sin(i * math.pi / 3),
                     center.y() - radius * math.cos(i * math.pi / 3)) for i in range(6)]
@@ -173,7 +176,7 @@ class StickyPanel(QWidget):
         self._shutting_down = False
         self._placed = False
         self._drag_position = None
-        self.setWindowTitle(f"Soundform — {title}")
+        self.setWindowTitle(f"{APP_NAME} — {title}")
         self.setMinimumSize(300, 240)
         self.resize(650 if title == "Analysis" else 420, self.minimumHeight())
         self.setObjectName("stickyPanel")

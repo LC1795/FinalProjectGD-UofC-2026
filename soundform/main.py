@@ -27,7 +27,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     from soundform.branding import configure_branding
     configure_branding(app)
+    # Keep the application identifier stable for existing settings.
     app.setApplicationName("Soundform")
+    from soundform import APP_NAME, __version__
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(__version__)
     app.setStyleSheet(STYLESHEET)
     window = MainWindow()
     # Assign directly after viewport construction as well as at application level.

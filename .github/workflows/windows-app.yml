@@ -27,13 +27,32 @@ jobs:
           python -m pytest soundform/tests -q
       - name: Build and check executable
         run: python packaging/build_windows.py
-      - name: Upload portable app
+      - name: Check installed app and uninstaller
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'SoundForm V2.0'
+          $installer = Start-Process dist/SoundForm-V2.0-Setup-x64.exe -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$target`"" -Wait -PassThru
+          if ($installer.ExitCode -ne 0) { throw "Installer exited with code $($installer.ExitCode)." }
+          try {
+            $report = Join-Path $env:RUNNER_TEMP 'soundform-installed-smoke.json'
+            $app = Start-Process (Join-Path $target 'Soundform.exe') -ArgumentList "--smoke-test `"$report`"" -WorkingDirectory $env:RUNNER_TEMP -Wait -PassThru
+            if ($app.ExitCode -ne 0 -or -not (Get-Content $report | ConvertFrom-Json).ok) {
+              throw "The installed app failed its launch check."
+            }
+          } finally {
+            $uninstall = Start-Process (Join-Path $target 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+            if ($uninstall.ExitCode -ne 0 -or (Test-Path (Join-Path $target 'Soundform.exe'))) {
+              throw "The uninstall check failed."
+            }
+          }
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Soundform-Windows-x64
+          name: SoundForm-V2.0-Windows-x64
           path: |
-            dist/Soundform-Windows-x64.zip
-            dist/Soundform-Windows-x64.zip.sha256
+            dist/SoundForm-V2.0-Windows-x64.zip
+            dist/SoundForm-V2.0-Windows-x64.zip.sha256
+            dist/SoundForm-V2.0-Setup-x64.exe
             dist/smoke-test.json
           if-no-files-found: error
 
